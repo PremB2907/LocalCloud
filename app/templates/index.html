@@ -1,0 +1,357 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="LocalCloud Console — loopback-only operations dashboard for the Floci 2.2.0 local AWS emulator. Inspect and manage S3, DynamoDB, SQS, SNS, Lambda, EC2, CloudWatch, and API Gateway resources.">
+  <meta name="theme-color" content="#0f1c2e">
+  <title>LocalCloud Console</title>
+  <!-- Inline theme IIFE to prevent flash -->
+  <script>
+    (function(){
+      var t = localStorage.getItem("lc_theme");
+      var d = (!t && window.matchMedia("(prefers-color-scheme: light)").matches) ? "light" : (t || "dark");
+      document.documentElement.dataset.theme = d;
+    })();
+  </script>
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+</head>
+<body>
+
+<!-- ======== SVG Icon Sprite (Lucide subset) ======== -->
+<svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
+  <!-- layout-dashboard -->
+  <symbol id="icon-overview" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/>
+  </symbol>
+  <!-- box (S3) -->
+  <symbol id="icon-s3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
+    <polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/>
+  </symbol>
+  <!-- database (DynamoDB) -->
+  <symbol id="icon-dynamodb" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>
+  </symbol>
+  <!-- list (SQS) -->
+  <symbol id="icon-sqs" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/>
+    <line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/>
+  </symbol>
+  <!-- bell (SNS) -->
+  <symbol id="icon-sns" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/>
+  </symbol>
+  <!-- zap (Lambda) -->
+  <symbol id="icon-lambda" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+  </symbol>
+  <!-- server (EC2) -->
+  <symbol id="icon-ec2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="2" y="2" width="20" height="8" rx="2" ry="2"/><rect x="2" y="14" width="20" height="8" rx="2" ry="2"/>
+    <line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/>
+  </symbol>
+  <!-- activity (CloudWatch) -->
+  <symbol id="icon-cloudwatch" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+  </symbol>
+  <!-- git-merge (API Gateway) -->
+  <symbol id="icon-api_gateway" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M6 21V9a9 9 0 0 0 9 9"/>
+  </symbol>
+  <!-- clock (Operations) -->
+  <symbol id="icon-ops" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+  </symbol>
+  <!-- sun -->
+  <symbol id="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="12" cy="12" r="5"/>
+    <line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/>
+    <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/>
+    <line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/>
+    <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+  </symbol>
+  <!-- moon -->
+  <symbol id="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+  </symbol>
+  <!-- search -->
+  <symbol id="icon-search" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+  </symbol>
+  <!-- refresh-cw -->
+  <symbol id="icon-refresh" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/>
+    <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+  </symbol>
+  <!-- menu (hamburger) -->
+  <symbol id="icon-menu" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/>
+  </symbol>
+  <!-- x (close) -->
+  <symbol id="icon-x" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+  </symbol>
+  <!-- check-circle -->
+  <symbol id="icon-check-circle" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/>
+  </symbol>
+  <!-- alert-circle -->
+  <symbol id="icon-alert-circle" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+  </symbol>
+  <!-- cloud (brand) -->
+  <symbol id="icon-cloud" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/>
+  </symbol>
+  <!-- external-link -->
+  <symbol id="icon-external" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
+    <polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>
+  </symbol>
+</svg>
+
+<!-- ======== APP SHELL ======== -->
+<div class="console-shell">
+
+  <!-- SIDEBAR -->
+  <aside class="sidebar" id="sidebar" aria-label="Main navigation">
+
+    <!-- Brand -->
+    <a class="brand" href="#overview" data-view="overview" aria-label="LocalCloud Console — go to overview">
+      <div class="brand-mark" aria-hidden="true">
+        <svg><use href="#icon-cloud"/></svg>
+      </div>
+      <div class="brand-copy">
+        <strong>LocalCloud</strong>
+        <small>Operations Console</small>
+      </div>
+    </a>
+
+    <!-- Nav groups -->
+    <nav aria-label="Cloud service navigation">
+
+      <div class="nav-group">
+        <div class="nav-caption" role="presentation">Overview</div>
+        <a href="#overview" class="nav-item is-active" data-view="overview" aria-current="page">
+          <svg class="nav-icon" aria-hidden="true"><use href="#icon-overview"/></svg>
+          Dashboard
+        </a>
+      </div>
+
+      <div class="nav-group">
+        <div class="nav-caption" role="presentation">Compute</div>
+        <a href="#lambda" class="nav-item" data-view="lambda">
+          <svg class="nav-icon" aria-hidden="true"><use href="#icon-lambda"/></svg>
+          Lambda
+        </a>
+        <a href="#ec2" class="nav-item" data-view="ec2">
+          <svg class="nav-icon" aria-hidden="true"><use href="#icon-ec2"/></svg>
+          EC2 Instances
+        </a>
+      </div>
+
+      <div class="nav-group">
+        <div class="nav-caption" role="presentation">Storage</div>
+        <a href="#s3" class="nav-item" data-view="s3">
+          <svg class="nav-icon" aria-hidden="true"><use href="#icon-s3"/></svg>
+          S3
+        </a>
+        <a href="#dynamodb" class="nav-item" data-view="dynamodb">
+          <svg class="nav-icon" aria-hidden="true"><use href="#icon-dynamodb"/></svg>
+          DynamoDB
+        </a>
+      </div>
+
+      <div class="nav-group">
+        <div class="nav-caption" role="presentation">App Integration</div>
+        <a href="#sqs" class="nav-item" data-view="sqs">
+          <svg class="nav-icon" aria-hidden="true"><use href="#icon-sqs"/></svg>
+          SQS
+        </a>
+        <a href="#sns" class="nav-item" data-view="sns">
+          <svg class="nav-icon" aria-hidden="true"><use href="#icon-sns"/></svg>
+          SNS
+        </a>
+        <a href="#api_gateway" class="nav-item" data-view="api_gateway">
+          <svg class="nav-icon" aria-hidden="true"><use href="#icon-api_gateway"/></svg>
+          API Gateway
+        </a>
+      </div>
+
+      <div class="nav-group">
+        <div class="nav-caption" role="presentation">Observability</div>
+        <a href="#cloudwatch" class="nav-item" data-view="cloudwatch">
+          <svg class="nav-icon" aria-hidden="true"><use href="#icon-cloudwatch"/></svg>
+          CloudWatch
+        </a>
+      </div>
+
+    </nav>
+
+    <!-- Sidebar footer -->
+    <div class="sidebar-footer" aria-label="Environment information">
+      <div class="footer-env-badge">
+        <span class="footer-env-dot" aria-hidden="true"></span>
+        LOCAL ENVIRONMENT
+      </div>
+      <span class="footer-endpoint">127.0.0.1:4566</span>
+      <span id="sidebar-version" class="footer-version">Checking connection…</span>
+    </div>
+
+  </aside>
+
+  <!-- Mobile overlay -->
+  <div id="sidebar-overlay" class="sidebar-overlay" aria-hidden="true"></div>
+
+  <!-- MAIN COLUMN -->
+  <div class="main-column">
+
+    <!-- TOPBAR -->
+    <header class="topbar" role="banner">
+      <button
+        class="menu-toggle"
+        id="menu-toggle"
+        type="button"
+        aria-label="Open navigation menu"
+        aria-expanded="false"
+        aria-controls="sidebar"
+      >
+        <svg aria-hidden="true"><use href="#icon-menu"/></svg>
+      </button>
+
+      <!-- Breadcrumb -->
+      <nav class="topbar-breadcrumb" aria-label="Breadcrumb">
+        <span class="breadcrumb-root">LocalCloud</span>
+        <span class="breadcrumb-sep" aria-hidden="true">›</span>
+        <span class="breadcrumb-current" id="breadcrumb-current">Overview</span>
+      </nav>
+
+      <!-- Right-side actions -->
+      <div class="topbar-actions">
+
+        <!-- Search / command palette trigger -->
+        <button
+          class="search-trigger"
+          id="search-trigger"
+          type="button"
+          aria-label="Open command palette (Ctrl+K)"
+          aria-keyshortcuts="Control+K"
+        >
+          <svg aria-hidden="true"><use href="#icon-search"/></svg>
+          <span>Search</span>
+          <span class="search-kbd" aria-label="keyboard shortcut">Ctrl K</span>
+        </button>
+
+        <!-- Floci connection status -->
+        <div
+          id="connection-pill"
+          class="connection-pill is-checking"
+          role="status"
+          aria-live="polite"
+          aria-label="Floci connection status"
+        >
+          <span class="connection-dot" aria-hidden="true"></span>
+          <span id="connection-text">Checking</span>
+        </div>
+
+        <!-- Refresh -->
+        <button
+          id="refresh-button"
+          class="refresh-button"
+          type="button"
+          aria-label="Refresh current view"
+          title="Refresh (reloads data from Floci)"
+        >
+          <svg aria-hidden="true"><use href="#icon-refresh"/></svg>
+          Refresh
+        </button>
+
+        <!-- Theme toggle -->
+        <button
+          id="theme-toggle"
+          class="icon-btn"
+          type="button"
+          aria-label="Toggle dark / light theme"
+          title="Toggle theme"
+        >
+          <svg aria-hidden="true" id="theme-icon"><use href="#icon-sun"/></svg>
+        </button>
+
+      </div>
+    </header>
+
+    <!-- MAIN CONTENT -->
+    <main id="page-content" class="page-content" tabindex="-1" aria-label="Service content">
+      <!-- Loading skeleton -->
+      <div class="initial-state" aria-live="polite">
+        <div class="skeleton-grid">
+          <div class="skeleton-card"></div>
+          <div class="skeleton-card"></div>
+          <div class="skeleton-card"></div>
+          <div class="skeleton-card"></div>
+          <div class="skeleton-card"></div>
+          <div class="skeleton-card"></div>
+          <div class="skeleton-card"></div>
+          <div class="skeleton-card"></div>
+        </div>
+        <span>Loading live Floci inventory…</span>
+      </div>
+    </main>
+
+    <!-- TOAST REGION -->
+    <div id="toast-region" class="toast-region" role="status" aria-live="polite" aria-atomic="false"></div>
+
+  </div><!-- /main-column -->
+</div><!-- /console-shell -->
+
+<!-- CONFIRM DIALOG -->
+<dialog id="confirm-dialog" class="confirm-dialog" aria-labelledby="confirm-title" aria-modal="true">
+  <form id="confirm-form" method="dialog" novalidate>
+    <h2 id="confirm-title">Confirm action</h2>
+    <p id="confirm-description"></p>
+    <label id="confirm-label" for="confirm-input">Type the requested value to confirm</label>
+    <input
+      id="confirm-input"
+      type="text"
+      autocomplete="off"
+      spellcheck="false"
+      aria-describedby="confirm-description"
+    >
+    <div class="dialog-actions">
+      <button id="confirm-cancel" class="secondary-button" type="button">Cancel</button>
+      <button id="confirm-submit" class="danger-button" type="submit" disabled>Confirm</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- COMMAND PALETTE -->
+<div id="cmd-palette" class="cmd-palette is-hidden" role="dialog" aria-label="Command palette" aria-modal="true">
+  <div class="cmd-palette-box" id="cmd-palette-box">
+    <div class="cmd-palette-input-row">
+      <svg aria-hidden="true"><use href="#icon-search"/></svg>
+      <input
+        id="cmd-palette-input"
+        class="cmd-palette-input"
+        type="text"
+        placeholder="Go to a service or search…"
+        autocomplete="off"
+        spellcheck="false"
+        aria-label="Command palette search"
+        aria-autocomplete="list"
+        aria-controls="cmd-palette-results"
+      >
+      <span class="cmd-palette-esc" aria-label="Press Escape to close">Esc</span>
+    </div>
+    <div id="cmd-palette-results" role="listbox" aria-label="Commands"></div>
+    <div class="cmd-palette-footer" aria-hidden="true">
+      <span><kbd>↑↓</kbd> navigate</span>
+      <span><kbd>↵</kbd> select</span>
+      <span><kbd>Esc</kbd> close</span>
+    </div>
+  </div>
+</div>
+
+<script defer src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

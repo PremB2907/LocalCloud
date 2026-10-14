@@ -1,0 +1,208 @@
+import io
+import os
+import time
+import uuid
+from urllib.parse import urlsplit
+
+import boto3
+import pytest
+
+
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.skipif(os.environ.get("RUN_FLOCI_INTEGRATION") != "1", reason="set RUN_FLOCI_INTEGRATION=1 to use live Floci"),
+]
+
+
+def _client(app, service):
+    return app.extensions["aws_clients"].get(service)
+
+
+def _suffix():
+    return uuid.uuid4().hex[:10]
+
+
+def test_s3_dashboard_upload_list_metadata_download_and_confirmed_delete(app):
+    client = app.test_client()
+    s3 = _client(app, "s3")
+    bucket = f"lc-console-it-s3-{_suffix()}"
+    key = "validation/roundtrip.txt"
+    expected = b"LocalCloud Console S3 integration"
+    created = False
+    try:
+        response = client.post("/api/services/s3/buckets", json={"name": bucket})
+        assert response.status_code == 201, response.json
+        created = True
+        response = client.post("/api/services/s3/objects", data={
+            "bucket": bucket,
+            "key": key,
+            "file": (io.BytesIO(expected), "roundtrip.txt", "text/plain"),
+        }, content_type="multipart/form-data")
+        assert response.status_code == 201, response.json
+        listed = client.get(f"/api/services/s3/buckets/{bucket}/objects")
+        assert listed.status_code == 200 and listed.json["objects"][0]["key"] == key
+        metadata = client.get(f"/api/services/s3/buckets/{bucket}/objects/{key}/metadata")
+        assert metadata.status_code == 200 and metadata.json["metadata"]["content_length"] == len(expected)
+        download = client.get(f"/api/services/s3/buckets/{bucket}/objects/{key}/download")
+        assert download.status_code == 200 and download.data == expected
+        refused = client.post("/api/services/s3/objects/delete", json={"bucket": bucket, "key": key})
+        assert refused.status_code == 400
+        deleted = client.post("/api/services/s3/objects/delete", json={
+            "bucket": bucket, "key": key, "confirmed": True, "confirm_value": key,
+        })
+        assert deleted.status_code == 200
+    finally:
+        if created:
+            for item in s3.list_objects_v2(Bucket=bucket).get("Contents", []):
+                s3.delete_object(Bucket=bucket, Key=item["Key"])
+            s3.delete_bucket(Bucket=bucket)
+            assert bucket not in {item["Name"] for item in s3.list_buckets().get("Buckets", [])}
+
+
+def test_dynamodb_dashboard_create_insert_and_retrieve(app):
+    client = app.test_client()
+    ddb = _client(app, "dynamodb")
+    table = f"lc-console-it-ddb-{_suffix()}"
+    partition_key = "integration-sample"
+    created = False
+    try:
+        response = client.post("/api/services/dynamodb/tables", json={"name": table})
+        assert response.status_code == 201, response.json
+        created = True
+        response = client.post("/api/services/dynamodb/items", json={
+            "table": table, "pk": partition_key, "value": "Floci dashboard integration",
+        })
+        assert response.status_code == 201, response.json
+        item = client.get("/api/services/dynamodb/items", query_string={"table": table, "pk": partition_key})
+        assert item.status_code == 200
+        assert item.json["item"] == {
+            "pk": {"S": partition_key},
+            "value": {"S": "Floci dashboard integration"},
+        }
+        duplicate = client.post("/api/services/dynamodb/items", json={
+            "table": table, "pk": partition_key, "value": "must not overwrite",
+        })
+        assert duplicate.status_code == 400
+    finally:
+        if created:
+            ddb.delete_table(TableName=table)
+            ddb.get_waiter("table_not_exists").wait(TableName=table, WaiterConfig={"Delay": 1, "MaxAttempts": 20})
+            assert table not in set(ddb.list_tables(Limit=100).get("TableNames", []))
+
+
+def test_sqs_dashboard_create_send_receive_and_confirmed_delete(app):
+    client = app.test_client()
+    sqs = _client(app, "sqs")
+    queue_name = f"lc-console-it-sqs-{_suffix()}"
+    body = "Floci dashboard SQS integration"
+    queue_url = None
+    try:
+        response = client.post("/api/services/sqs/queues", json={"name": queue_name})
+        assert response.status_code == 201, response.json
+        queue_url = response.json["resource"]["url"]
+        attributes = client.get("/api/services/sqs/attributes", query_string={"queue_url": queue_url})
+        assert attributes.status_code == 200 and attributes.json["attributes"].get("QueueArn")
+        sent = client.post("/api/services/sqs/messages/send", json={"queue_url": queue_url, "message": body})
+        assert sent.status_code == 201, sent.json
+        received = client.post("/api/services/sqs/messages/receive", json={"queue_url": queue_url, "max_messages": 1})
+        assert received.status_code == 200 and len(received.json["messages"]) == 1
+        message = received.json["messages"][0]
+        assert message["Body"] == body
+        assert "ReceiptHandle" not in message and "receipt_handle" not in message
+        refused = client.post("/api/services/sqs/messages/delete", json={"message_id": message["MessageId"]})
+        assert refused.status_code == 400
+        deleted = client.post("/api/services/sqs/messages/delete", json={
+            "delete_token": message["delete_token"],
+            "message_id": message["MessageId"],
+            "confirmed": True,
+            "confirm_value": message["MessageId"],
+        })
+        assert deleted.status_code == 200
+    finally:
+        if queue_url:
+            sqs.delete_queue(QueueUrl=queue_url)
+            remaining = sqs.list_queues().get("QueueUrls", [])
+            assert all(urlsplit(url).path.rstrip("/").split("/")[-1] != queue_name for url in remaining)
+
+
+def test_sns_dashboard_publish_only_to_unsubscribed_temporary_topic(app):
+    client = app.test_client()
+    sns = _client(app, "sns")
+    topic_name = f"lc-console-it-sns-{_suffix()}"
+    topic_arn = None
+    try:
+        response = client.post("/api/services/sns/topics", json={"name": topic_name})
+        assert response.status_code == 201, response.json
+        topic_arn = response.json["resource"]["arn"]
+        subscriptions = client.get("/api/services/sns/subscriptions", query_string={"topic_arn": topic_arn})
+        assert subscriptions.status_code == 200 and subscriptions.json["subscriptions"] == []
+        published = client.post("/api/services/sns/publish", json={
+            "topic_arn": topic_arn,
+            "message": "Floci dashboard SNS integration",
+        })
+        assert published.status_code == 201 and published.json["message_id"]
+    finally:
+        if topic_arn:
+            sns.delete_topic(TopicArn=topic_arn)
+            names = {
+                topic["TopicArn"].rsplit(":", 1)[-1]
+                for page in sns.get_paginator("list_topics").paginate()
+                for topic in page.get("Topics", [])
+            }
+            assert topic_name not in names
+
+
+def test_api_gateway_dashboard_create_inspect_and_confirmed_delete(app):
+    client = app.test_client()
+    api = _client(app, "apigateway")
+    name = f"lc-console-it-api-{_suffix()}"
+    api_id = None
+    try:
+        response = client.post("/api/services/api_gateway/rest", json={"name": name})
+        assert response.status_code == 201, response.json
+        api_id = response.json["resource"]["id"]
+        resources = client.get(f"/api/services/api_gateway/rest/{api_id}/resources")
+        assert resources.status_code == 200 and resources.json["resources"]
+        refused = client.post("/api/services/api_gateway/rest/delete", json={"api_id": api_id, "name": name})
+        assert refused.status_code == 400
+        deleted = client.post("/api/services/api_gateway/rest/delete", json={
+            "api_id": api_id, "name": name, "confirmed": True, "confirm_value": name,
+        })
+        assert deleted.status_code == 200
+        remaining = api.get_rest_apis(limit=100).get("items", [])
+        assert all(item.get("id") != api_id for item in remaining)
+        api_id = None
+    finally:
+        if api_id:
+            api.delete_rest_api(restApiId=api_id)
+
+
+def test_cloudwatch_dashboard_reads_real_log_events_and_cleans_temporary_group(app):
+    client = app.test_client()
+    logs = _client(app, "logs")
+    group = f"/localcloud/integration/{_suffix()}"
+    stream = "console-check"
+    message = "Floci dashboard CloudWatch integration"
+    created = False
+    try:
+        logs.create_log_group(logGroupName=group)
+        created = True
+        logs.create_log_stream(logGroupName=group, logStreamName=stream)
+        logs.put_log_events(
+            logGroupName=group,
+            logStreamName=stream,
+            logEvents=[{"timestamp": int(time.time() * 1000), "message": message}],
+        )
+        groups = client.get("/api/services/cloudwatch")
+        assert groups.status_code == 200
+        assert any(item["name"] == group for item in groups.json["data"]["log_groups"]["log_groups"])
+        streams = client.get("/api/services/cloudwatch/streams", query_string={"group": group})
+        assert streams.status_code == 200 and streams.json["streams"]
+        events = client.get("/api/services/cloudwatch/events", query_string={"group": group, "stream": stream})
+        assert events.status_code == 200
+        assert any(item["message"] == message for item in events.json["events"])
+    finally:
+        if created:
+            logs.delete_log_group(logGroupName=group)
+            remaining = logs.describe_log_groups(logGroupNamePrefix=group, limit=50).get("logGroups", [])
+            assert all(item.get("logGroupName") != group for item in remaining)
