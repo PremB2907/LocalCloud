@@ -18,10 +18,10 @@ Open `http://127.0.0.1:5000`. The dashboard binds to loopback. Verify Floci is r
 ## Suggested Walkthrough
 
 1. **Overview:** Show the actual endpoint/version and live resource counts. Empty counts are real API responses, not sample numbers.
-2. **S3:** Create a uniquely named bucket, upload a small text file, list its object, inspect metadata, and download it. To delete the object, type its exact key into the confirmation dialog. The app refuses to overwrite an existing object key.
-3. **DynamoDB:** Create a uniquely named on-demand table with String partition key `pk`; insert a sample item; retrieve it. Sample item writes are limited to tables created by the current dashboard process and duplicate keys are refused.
+2. **S3:** Create a uniquely named bucket, upload a small text file, list its object, inspect metadata, and download it. The download uses the object's key as its filename; if that key has no extension, the app adds one based on the stored content type (for example, `demo` with `application/pdf` downloads as `demo.pdf`). To delete the object, type its exact key into the confirmation dialog. The app refuses to overwrite an existing object key. Delete an empty, session-created bucket by typing its exact name.
+3. **DynamoDB:** Create a uniquely named on-demand table with String partition key `pk`; write JSON items, retrieve an item, or scan up to 100 items per page. Replacing an existing item requires explicit selection and exact `pk` confirmation. Items and session-created tables can be deleted with exact confirmation.
 4. **SQS:** Create a standard queue, send a short message, receive it, and delete only the selected message by typing its exact message ID. Raw receipt handles are never shown to the browser.
-5. **SNS:** Create a topic and publish a test message only while it has no subscriptions. The UI asks for `PUBLISH`; the backend rechecks subscriptions before publishing.
+5. **SNS:** Create a topic, subscribe a local SQS queue, publish a test message, and receive it from that queue. The UI asks for `PUBLISH`; the backend rechecks subscriptions before publishing. Floci does not send SNS email confirmations or deliver to email endpoints; use AWS SNS if the demo requires a real confirmation email.
 6. **CloudWatch:** Show live metric/log-group empty states, or inspect existing log groups, streams, and events if present. The dashboard does not generate metric data.
 7. **API Gateway:** Create a REST API, inspect its resources, then delete that session-owned API by typing its exact name. Creation does not deploy a stage or make a public endpoint.
 8. **Lambda:** Create a function from inline Python, invoke it, show the response, then delete the session-owned function by typing its exact name.
@@ -34,9 +34,9 @@ Open `http://127.0.0.1:5000`. The dashboard binds to loopback. Verify Floci is r
 
 Dashboard operations create Floci resources until explicitly removed or the memory-backed Floci container is restarted. There is no delete-all action. Record the exact resource name, ARN, or URL shown by the app.
 
-The UI exposes only selected-object deletion, selected received-message deletion, and current-process REST API, Lambda function, EC2 instance, and EC2 key pair deletion, all with exact-resource confirmation. It deliberately does not expose bucket/table/queue/topic deletion. To remove a demo-created resource, call the corresponding SDK operation with the exact recorded identifier: `s3.delete_bucket(Bucket="<exact-empty-demo-bucket>")`, `dynamodb.delete_table(TableName="<exact-demo-table>")`, `sqs.delete_queue(QueueUrl="<exact-demo-queue-url>")`, or `sns.delete_topic(TopicArn="<exact-demo-topic-arn>")`.
+The UI exposes selected-object deletion, empty session-created bucket deletion, DynamoDB item/table deletion, selected received-message deletion, and current-process REST API, Lambda function, EC2 instance, and EC2 key pair deletion, all with exact-resource confirmation. It does not expose delete-all operations or queue/topic deletion.
 
-Do not replace those exact-resource calls with a broad list loop or delete-all operation. DynamoDB table/API ownership markers are process-local; after a dashboard restart those existing resources remain visible but ownership-restricted write/delete actions are unavailable in the app.
+Do not replace those exact-resource operations with a broad list loop or delete-all operation. S3 bucket and DynamoDB table ownership markers are process-local; after a dashboard restart those resources remain visible but ownership-restricted delete actions are unavailable in the app.
 
 ## Verification Commands
 

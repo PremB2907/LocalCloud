@@ -10,6 +10,13 @@ def create_bucket(client, bucket_name):
     return client.create_bucket(Bucket=bucket_name)
 
 
+def delete_empty_bucket(client, bucket_name):
+    objects = client.list_objects_v2(Bucket=bucket_name, MaxKeys=1).get("Contents", [])
+    if objects:
+        raise ValueError("Bucket is not empty. Delete its objects before deleting the bucket.")
+    return client.delete_bucket(Bucket=bucket_name)
+
+
 def list_buckets(client):
     response = client.list_buckets()
     return [

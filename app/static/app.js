@@ -533,7 +533,8 @@ function serviceControls(key, data) {
     const opts = selectOptions(data.buckets, "name", "name");
     const bucketRows = data.buckets.map((b) =>
       `<div class="action-list-row"><span><strong>${escapeHtml(b.name)}</strong></span>` +
-      `<div class="action-list-buttons"><button class="secondary-button" data-action="list-objects" data-bucket="${escapeHtml(b.name)}">List objects</button></div></div>`
+      `<div class="action-list-buttons"><button class="secondary-button" data-action="list-objects" data-bucket="${escapeHtml(b.name)}">List objects</button>` +
+      `${b.console_owned ? `<button class="danger-button" data-action="delete-bucket" data-bucket="${escapeHtml(b.name)}">Delete empty bucket</button>` : ""}</div></div>`
     ).join("");
     return `
       ${panel("Create Bucket", "Live Floci operation",
@@ -560,7 +561,8 @@ function serviceControls(key, data) {
     const opts  = selectOptions(owned, "name", "name");
     const tableRows = data.tables.map((t) =>
       `<div class="action-list-row"><span><strong>${escapeHtml(t.name)}</strong>${t.console_owned ? ` <span class="badge badge-info" style="margin-left:6px">Session</span>` : ""}</span>` +
-      `<button class="secondary-button" data-action="inspect-table" data-table="${escapeHtml(t.name)}">Inspect</button></div>`
+      `<div class="action-list-buttons"><button class="secondary-button" data-action="inspect-table" data-table="${escapeHtml(t.name)}">Inspect</button>` +
+      `${t.console_owned ? `<button class="danger-button" data-action="delete-table" data-table="${escapeHtml(t.name)}">Delete</button>` : ""}</div></div>`
     ).join("");
     return `
       ${panel("Create Table", "PAY_PER_REQUEST · String pk",
@@ -570,13 +572,13 @@ function serviceControls(key, data) {
           <button class="primary-button" type="submit">Create table</button>
         </form>`
       )}
-      ${panel("Insert Item", "Session-owned tables only",
+      ${panel("Put Item", "JSON · session-owned tables only",
         `<form class="action-form" data-action="put-item">
           <label>Table<select name="table" required ${owned.length ? "" : "disabled"}>${opts}</select></label>
-          <label>Partition key (pk)<input name="pk" required maxlength="256" placeholder="sample-001" autocomplete="off"></label>
-          <label>Value<input name="value" required maxlength="4096" placeholder="Local test record" autocomplete="off"></label>
+          <label>Item JSON<textarea name="item_json" required rows="7" spellcheck="false" placeholder='{"pk":"sample-001","value":"hello","count":1}'></textarea></label>
+          <label class="checkbox-label"><input name="overwrite" type="checkbox" value="true"> Replace the item if this pk already exists</label>
           ${!owned.length ? `<span class="form-note">Create a table this session to enable writes. Pre-existing tables are read-only here.</span>` : ""}
-          <button class="primary-button" type="submit" ${owned.length ? "" : "disabled"}>Insert item</button>
+          <button class="primary-button" type="submit" ${owned.length ? "" : "disabled"}>Put item</button>
         </form>`
       )}
       ${owned.length ? panel("Retrieve Item", "Consistent read",
@@ -584,6 +586,11 @@ function serviceControls(key, data) {
           <label>Table<select name="table" required>${opts}</select></label>
           <label>Partition key<input name="pk" required maxlength="256" autocomplete="off"></label>
           <button class="secondary-button" type="submit">Retrieve item</button>
+        </form>`) : ""}
+      ${owned.length ? panel("Browse Items", "Scan · 100 items per page",
+        `<form class="action-form" data-action="scan-items">
+          <label>Table<select name="table" required>${opts}</select></label>
+          <button class="secondary-button" type="submit">Scan table</button>
         </form>`) : ""}
       ${data.tables.length
         ? `<section class="panel"><div class="panel-heading"><h3>Table Details</h3><span class="panel-meta">DescribeTable</span></div><div class="action-list">${tableRows}</div></section>`
@@ -645,7 +652,8 @@ function serviceControls(key, data) {
         </form>`
       )}
       ${panel("Create Subscription", "Subscribe an endpoint to a topic",
-        `<form class="action-form" data-action="subscribe-topic">
+        `<div class="warn-band safety-note">Floci does not send SNS email confirmation messages. An email subscription is only recorded locally; use a local SQS subscription to demonstrate message delivery. Real email confirmation requires AWS SNS.</div>
+        <form class="action-form" data-action="subscribe-topic">
           <label>Topic<select name="topic_arn" required ${data.topics.length ? "" : "disabled"}>${opts}</select></label>
           <label>Protocol<select name="protocol" required>
             <option value="email">email</option>
@@ -657,7 +665,7 @@ function serviceControls(key, data) {
             <option value="lambda">lambda</option>
           </select></label>
           <label>Endpoint<input name="endpoint" required placeholder="user@example.com or local SQS ARN" autocomplete="off"></label>
-          <span class="form-note">For SQS fan-out, use the ARN shown in SQS &gt; Attributes. Publishing supports only local SQS endpoints.</span>
+          <span class="form-note">For a working local delivery demo, choose SQS and use the ARN shown in SQS &gt; Attributes. Other protocols do not deliver messages through Floci.</span>
           <button class="primary-button" type="submit" ${data.topics.length ? "" : "disabled"}>Subscribe</button>
         </form>`
       )}
@@ -1072,6 +1080,42 @@ function showObjectListing(bucket, response) {
   ));
 }
 
+function showDdbScan(table, response) {
+  const pane = document.getElementById("detail-pane");
+  if (!pane) return;
+  pane.innerHTML = "";
+  const items = response.items || [];
+  const rows = items.map((item) =>
+    el("tr", {},
+      el("td", { class: "mono" }, item.pk),
+      el("td", { class: "mono" }, JSON.stringify(item)),
+      el("td", {}, el("button", {
+        class: "danger-button",
+        "data-action": "delete-item",
+        "data-table": table,
+        "data-pk": item.pk,
+      }, "Delete"))
+    )
+  );
+  const next = response.next_token
+    ? el("button", { class: "secondary-button", "data-action": "scan-items-next", "data-table": table, "data-token": response.next_token }, "Next page")
+    : null;
+  pane.appendChild(buildPanel(
+    `Items in ${table}`,
+    `${items.length} returned${response.next_token ? " · more available" : ""}`,
+    el("div", {}, ...[
+      items.length
+        ? el("div", { class: "table-scroll" },
+          el("table", {},
+            el("thead", {}, el("tr", {}, el("th", {}, "pk"), el("th", {}, "Item JSON"), el("th", {}, "Actions"))),
+            el("tbody", {}, ...rows)
+          ))
+        : el("div", { class: "empty-state" }, el("strong", {}, "No items found"), el("span", {}, "Put an item in this table to get started.")),
+      next ? el("div", { style: "padding:12px 16px;border-top:1px solid var(--border)" }, next) : null,
+    ].filter(Boolean))
+  ));
+}
+
 /* =============================================================
    FORM SUBMIT HANDLER
    ============================================================= */
@@ -1101,7 +1145,36 @@ async function handleFormSubmit(event) {
     } else if (action === "create-table") {
       result = await postJson("/api/services/dynamodb/tables", values);
     } else if (action === "put-item") {
-      result = await postJson("/api/services/dynamodb/items", values);
+      let item;
+      try {
+        item = JSON.parse(values.item_json);
+      } catch {
+        throw new Error("Item JSON is not valid.");
+      }
+      if (!item || typeof item !== "object" || Array.isArray(item) || typeof item.pk !== "string" || !item.pk) {
+        throw new Error('Item JSON must be an object with a non-empty String "pk".');
+      }
+      const overwrite = form.elements.overwrite.checked;
+      const confirmation = overwrite
+        ? await confirmExact("Replace DynamoDB Item", "Replaces every attribute on the existing item with this JSON.", item.pk, "Replace item")
+        : false;
+      if (overwrite && !confirmation) {
+        if (submitBtn && !wasDisabled) submitBtn.disabled = false;
+        return;
+      }
+      result = await postJson("/api/services/dynamodb/items", {
+        table: values.table,
+        item,
+        overwrite,
+        ...(overwrite ? { confirmed: true, confirm_value: item.pk } : {}),
+      });
+    } else if (action === "scan-items") {
+      const query = new URLSearchParams({ table: values.table });
+      result = await requestJson(`/api/services/dynamodb/items/scan?${query}`);
+      showDdbScan(values.table, result);
+      toast(`${result.items.length} item(s) returned.`);
+      if (submitBtn && !wasDisabled) submitBtn.disabled = false;
+      return;
     } else if (action === "get-item") {
       const query = new URLSearchParams({ table: values.table, pk: values.pk });
       result = await requestJson(`/api/services/dynamodb/items?${query}`);
@@ -1197,7 +1270,11 @@ async function handleFormSubmit(event) {
       return;
     }
 
-    toast(`${actionLabel(action)} succeeded.`);
+    if (action === "subscribe-topic" && ["email", "email-json"].includes(values.protocol)) {
+      toast("Subscription recorded in Floci; no confirmation email was sent.");
+    } else {
+      toast(`${actionLabel(action)} succeeded.`);
+    }
     await navigate(currentView);
   } catch (error) {
     toast(`${error.code || "Error"}: ${error.message}`, true);
@@ -1259,9 +1336,37 @@ async function handleActionClick(event) {
       toast("DeleteObject succeeded.");
       await navigate("s3");
 
+    } else if (action === "delete-bucket") {
+      const name = button.dataset.bucket;
+      if (!await confirmExact("Delete S3 Bucket", "Only an empty bucket created in this dashboard session can be deleted.", name, "Delete bucket")) return;
+      await postJson("/api/services/s3/buckets/delete", { name, confirmed: true, confirm_value: name });
+      toast("DeleteBucket succeeded.");
+      await navigate("s3");
+
     } else if (action === "inspect-table") {
       const r = await requestJson(`/api/services/dynamodb/tables/${encodeURIComponent(button.dataset.table)}`);
       showDetail("Table Metadata", [r.table], Object.keys(r.table).map((n) => [n, n]));
+
+    } else if (action === "scan-items-next") {
+      const query = new URLSearchParams({ table: button.dataset.table, next_token: button.dataset.token });
+      const r = await requestJson(`/api/services/dynamodb/items/scan?${query}`);
+      showDdbScan(button.dataset.table, r);
+
+    } else if (action === "delete-item") {
+      const table = button.dataset.table;
+      const pk = button.dataset.pk;
+      if (!await confirmExact("Delete DynamoDB Item", `Deletes this item from "${table}".`, pk, "Delete item")) return;
+      await postJson("/api/services/dynamodb/items/delete", { table, pk, confirmed: true, confirm_value: pk });
+      toast("DeleteItem succeeded.");
+      const query = new URLSearchParams({ table });
+      showDdbScan(table, await requestJson(`/api/services/dynamodb/items/scan?${query}`));
+
+    } else if (action === "delete-table") {
+      const name = button.dataset.table;
+      if (!await confirmExact("Delete DynamoDB Table", "Deletes the table and all items in it.", name, "Delete table")) return;
+      await postJson("/api/services/dynamodb/tables/delete", { name, confirmed: true, confirm_value: name });
+      toast("DeleteTable succeeded.");
+      await navigate("dynamodb");
 
     } else if (action === "inspect-function") {
       const r = await requestJson(`/api/services/lambda/functions/${encodeURIComponent(button.dataset.function)}`);

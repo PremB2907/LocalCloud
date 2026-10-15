@@ -1,4 +1,5 @@
 import json
+import mimetypes
 import re
 import secrets
 import shlex
@@ -138,7 +139,8 @@ def _safe_error(error):
 def _load_service(service_name):
     clients = current_app.extensions["aws_clients"]
     if service_name == "s3":
-        return {"buckets": s3.list_buckets(clients.get("s3"))}
+        owned = current_app.extensions["console_created_buckets"]
+        return {"buckets": [{**bucket, "console_owned": bucket["name"] in owned} for bucket in s3.list_buckets(clients.get("s3"))]}
     if service_name == "dynamodb":
         owned = current_app.extensions["console_created_tables"]
         return {"tables": [{**table, "console_owned": table["name"] in owned} for table in dynamodb.list_tables(clients.get("dynamodb"))]}
@@ -380,11 +382,17 @@ def download_s3_object(bucket_name, key):
         response = s3.download_object(client, bucket_name, key)
         content = response["Body"].read()
         response["Body"].close()
+        content_type = metadata.get("content_type") or "application/octet-stream"
+        download_name = key.rsplit("/", 1)[-1] or "object"
+        if "." not in download_name:
+            extension = mimetypes.guess_extension(content_type.split(";", 1)[0].strip())
+            if extension:
+                download_name += extension
         return send_file(
             BytesIO(content),
-            mimetype=metadata.get("content_type") or "application/octet-stream",
+            mimetype=content_type,
             as_attachment=True,
-            download_name=key.rsplit("/", 1)[-1] or "object",
+            download_name=download_name,
         )
     except (ClientError, BotoCoreError) as error:
         detail, status = _safe_error(error)
@@ -399,10 +407,31 @@ def post_s3_bucket():
         return jsonify({"ok": False, "error": {"code": "ValidationError", "message": "Enter a valid lowercase S3 bucket name."}}), 400
     try:
         response = s3.create_bucket(_client("s3"), name)
+        current_app.extensions["console_created_buckets"].add(name)
         _record_operation("CreateBucket", name, "Succeeded")
         return jsonify({"ok": True, "resource": {"name": name}, "http_status": response["ResponseMetadata"]["HTTPStatusCode"]}), 201
     except (ClientError, BotoCoreError, ValueError) as error:
         _record_operation("CreateBucket", name, "Failed")
+        return _operation_error(error)
+
+
+@console.post("/api/services/s3/buckets/delete")
+def post_s3_bucket_delete():
+    payload = _body()
+    name = payload.get("name", "")
+    if not isinstance(name, str) or not BUCKET_PATTERN.fullmatch(name) or ".." in name:
+        return jsonify({"ok": False, "error": {"code": "ValidationError", "message": "Enter a valid bucket name."}}), 400
+    if name not in current_app.extensions["console_created_buckets"]:
+        return jsonify({"ok": False, "error": {"code": "BucketNotOwnedByConsole", "message": "Only buckets created in this dashboard session can be deleted here."}}), 403
+    if not _confirmation(payload, name):
+        return jsonify({"ok": False, "error": {"code": "ConfirmationRequired", "message": "Type the exact bucket name to confirm deletion."}}), 400
+    try:
+        response = s3.delete_empty_bucket(_client("s3"), name)
+        current_app.extensions["console_created_buckets"].discard(name)
+        _record_operation("DeleteBucket", name, "Succeeded")
+        return jsonify({"ok": True, "http_status": response["ResponseMetadata"]["HTTPStatusCode"]})
+    except (ClientError, BotoCoreError, ValueError) as error:
+        _record_operation("DeleteBucket", name, "Failed")
         return _operation_error(error)
 
 
@@ -468,18 +497,81 @@ def get_dynamodb_table(table_name):
 def post_dynamodb_item():
     payload = _body()
     table_name = payload.get("table", "")
-    partition_key = payload.get("pk", "")
-    value = payload.get("value", "")
     if table_name not in current_app.extensions["console_created_tables"]:
-        return jsonify({"ok": False, "error": {"code": "TableNotOwnedByConsole", "message": "For safety, sample writes are limited to tables created in this dashboard session."}}), 403
-    if not isinstance(partition_key, str) or not partition_key or len(partition_key) > 256 or not isinstance(value, str) or len(value) > 4096:
-        return jsonify({"ok": False, "error": {"code": "ValidationError", "message": "Enter a partition key (up to 256 characters) and a value (up to 4096 characters)."}}), 400
+        return jsonify({"ok": False, "error": {"code": "TableNotOwnedByConsole", "message": "Writes are limited to tables created in this dashboard session."}}), 403
+    item = payload.get("item")
+    if item is None:
+        partition_key = payload.get("pk", "")
+        value = payload.get("value", "")
+        if not isinstance(partition_key, str) or not partition_key or len(partition_key) > 256 or not isinstance(value, str) or len(value) > 4096:
+            return jsonify({"ok": False, "error": {"code": "ValidationError", "message": "Enter a partition key (up to 256 characters) and a value (up to 4096 characters)."}}), 400
+        item = {"pk": partition_key, "value": value}
+    if not isinstance(item, dict) or len(item) > 100:
+        return jsonify({"ok": False, "error": {"code": "ValidationError", "message": "Provide a JSON item object with no more than 100 attributes."}}), 400
     try:
-        response = dynamodb.put_test_item(_client("dynamodb"), table_name, partition_key, value)
+        if payload.get("overwrite") is True:
+            partition_key = item.get("pk")
+            if not isinstance(partition_key, str) or not _confirmation(payload, partition_key):
+                return jsonify({"ok": False, "error": {"code": "ConfirmationRequired", "message": "Type the exact item's pk to confirm replacement."}}), 400
+        response = dynamodb.put_json_item(_client("dynamodb"), table_name, item, overwrite=payload.get("overwrite") is True)
         _record_operation("PutItem", table_name, "Succeeded")
         return jsonify({"ok": True, "http_status": response["ResponseMetadata"]["HTTPStatusCode"]}), 201
     except (ClientError, BotoCoreError, ValueError) as error:
         _record_operation("PutItem", table_name, "Failed")
+        return _operation_error(error)
+
+
+@console.get("/api/services/dynamodb/items/scan")
+def get_dynamodb_items():
+    table_name = request.args.get("table", "")
+    if table_name not in current_app.extensions["console_created_tables"]:
+        return jsonify({"ok": False, "error": {"code": "TableNotOwnedByConsole", "message": "Scans are limited to tables created in this dashboard session."}}), 403
+    try:
+        result = dynamodb.scan_items(
+            _client("dynamodb"),
+            table_name,
+            next_token=request.args.get("next_token"),
+        )
+        return jsonify({"ok": True, **result})
+    except (ClientError, BotoCoreError, ValueError) as error:
+        return _operation_error(error)
+
+
+@console.post("/api/services/dynamodb/items/delete")
+def post_dynamodb_item_delete():
+    payload = _body()
+    table_name = payload.get("table", "")
+    partition_key = payload.get("pk", "")
+    if table_name not in current_app.extensions["console_created_tables"]:
+        return jsonify({"ok": False, "error": {"code": "TableNotOwnedByConsole", "message": "Deletes are limited to tables created in this dashboard session."}}), 403
+    if not isinstance(partition_key, str) or not partition_key or not _confirmation(payload, partition_key):
+        return jsonify({"ok": False, "error": {"code": "ConfirmationRequired", "message": "Type the exact item's pk to confirm deletion."}}), 400
+    try:
+        response = dynamodb.delete_item(_client("dynamodb"), table_name, partition_key)
+        _record_operation("DeleteItem", table_name, "Succeeded")
+        return jsonify({"ok": True, "http_status": response["ResponseMetadata"]["HTTPStatusCode"]})
+    except (ClientError, BotoCoreError) as error:
+        _record_operation("DeleteItem", table_name, "Failed")
+        return _operation_error(error)
+
+
+@console.post("/api/services/dynamodb/tables/delete")
+def post_dynamodb_table_delete():
+    payload = _body()
+    table_name = payload.get("name", "")
+    if not isinstance(table_name, str) or not TABLE_PATTERN.fullmatch(table_name):
+        return jsonify({"ok": False, "error": {"code": "ValidationError", "message": "Enter a valid table name."}}), 400
+    if table_name not in current_app.extensions["console_created_tables"]:
+        return jsonify({"ok": False, "error": {"code": "TableNotOwnedByConsole", "message": "Only tables created in this dashboard session can be deleted here."}}), 403
+    if not _confirmation(payload, table_name):
+        return jsonify({"ok": False, "error": {"code": "ConfirmationRequired", "message": "Type the exact table name to confirm deletion."}}), 400
+    try:
+        response = dynamodb.delete_table(_client("dynamodb"), table_name)
+        current_app.extensions["console_created_tables"].discard(table_name)
+        _record_operation("DeleteTable", table_name, "Succeeded")
+        return jsonify({"ok": True, "http_status": response["ResponseMetadata"]["HTTPStatusCode"]})
+    except (ClientError, BotoCoreError) as error:
+        _record_operation("DeleteTable", table_name, "Failed")
         return _operation_error(error)
 
 

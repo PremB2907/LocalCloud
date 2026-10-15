@@ -30,6 +30,7 @@ def test_s3_dashboard_upload_list_metadata_download_and_confirmed_delete(app):
     key = "validation/roundtrip.txt"
     expected = b"LocalCloud Console S3 integration"
     created = False
+    deleted_bucket = False
     try:
         response = client.post("/api/services/s3/buckets", json={"name": bucket})
         assert response.status_code == 201, response.json
@@ -46,46 +47,90 @@ def test_s3_dashboard_upload_list_metadata_download_and_confirmed_delete(app):
         assert metadata.status_code == 200 and metadata.json["metadata"]["content_length"] == len(expected)
         download = client.get(f"/api/services/s3/buckets/{bucket}/objects/{key}/download")
         assert download.status_code == 200 and download.data == expected
+        nonempty = client.post("/api/services/s3/buckets/delete", json={
+            "name": bucket, "confirmed": True, "confirm_value": bucket,
+        })
+        assert nonempty.status_code == 400
         refused = client.post("/api/services/s3/objects/delete", json={"bucket": bucket, "key": key})
         assert refused.status_code == 400
         deleted = client.post("/api/services/s3/objects/delete", json={
             "bucket": bucket, "key": key, "confirmed": True, "confirm_value": key,
         })
         assert deleted.status_code == 200
+        deleted = client.post("/api/services/s3/buckets/delete", json={
+            "name": bucket, "confirmed": True, "confirm_value": bucket,
+        })
+        assert deleted.status_code == 200, deleted.json
+        deleted_bucket = True
     finally:
-        if created:
+        if created and not deleted_bucket:
             for item in s3.list_objects_v2(Bucket=bucket).get("Contents", []):
                 s3.delete_object(Bucket=bucket, Key=item["Key"])
             s3.delete_bucket(Bucket=bucket)
             assert bucket not in {item["Name"] for item in s3.list_buckets().get("Buckets", [])}
 
 
-def test_dynamodb_dashboard_create_insert_and_retrieve(app):
+def test_dynamodb_dashboard_create_json_item_scan_replace_delete_and_table_cleanup(app):
     client = app.test_client()
     ddb = _client(app, "dynamodb")
     table = f"lc-console-it-ddb-{_suffix()}"
     partition_key = "integration-sample"
     created = False
+    deleted_table = False
     try:
         response = client.post("/api/services/dynamodb/tables", json={"name": table})
         assert response.status_code == 201, response.json
         created = True
         response = client.post("/api/services/dynamodb/items", json={
-            "table": table, "pk": partition_key, "value": "Floci dashboard integration",
+            "table": table,
+            "item": {
+                "pk": partition_key,
+                "value": "Floci dashboard integration",
+                "count": 3,
+                "tags": ["local", "test"],
+                "metadata": {"active": True},
+            },
         })
         assert response.status_code == 201, response.json
         item = client.get("/api/services/dynamodb/items", query_string={"table": table, "pk": partition_key})
         assert item.status_code == 200
-        assert item.json["item"] == {
-            "pk": {"S": partition_key},
-            "value": {"S": "Floci dashboard integration"},
-        }
+        assert item.json["item"]["value"] == {"S": "Floci dashboard integration"}
+        assert item.json["item"]["count"] == {"N": "3"}
+        scanned = client.get("/api/services/dynamodb/items/scan", query_string={"table": table})
+        assert scanned.status_code == 200, scanned.json
+        assert scanned.json["items"] == [{
+            "pk": partition_key,
+            "value": "Floci dashboard integration",
+            "count": 3,
+            "tags": ["local", "test"],
+            "metadata": {"active": True},
+        }]
         duplicate = client.post("/api/services/dynamodb/items", json={
-            "table": table, "pk": partition_key, "value": "must not overwrite",
+            "table": table, "item": {"pk": partition_key, "value": "must not overwrite"},
         })
         assert duplicate.status_code == 400
+        replaced = client.post("/api/services/dynamodb/items", json={
+            "table": table,
+            "item": {"pk": partition_key, "value": "replaced"},
+            "overwrite": True,
+            "confirmed": True,
+            "confirm_value": partition_key,
+        })
+        assert replaced.status_code == 201, replaced.json
+        updated = client.get("/api/services/dynamodb/items", query_string={"table": table, "pk": partition_key})
+        assert updated.json["item"]["value"] == {"S": "replaced"}
+        deleted = client.post("/api/services/dynamodb/items/delete", json={
+            "table": table, "pk": partition_key, "confirmed": True, "confirm_value": partition_key,
+        })
+        assert deleted.status_code == 200, deleted.json
+        assert client.get("/api/services/dynamodb/items", query_string={"table": table, "pk": partition_key}).json["item"] is None
+        deleted = client.post("/api/services/dynamodb/tables/delete", json={
+            "name": table, "confirmed": True, "confirm_value": table,
+        })
+        assert deleted.status_code == 200, deleted.json
+        deleted_table = True
     finally:
-        if created:
+        if created and not deleted_table:
             ddb.delete_table(TableName=table)
             ddb.get_waiter("table_not_exists").wait(TableName=table, WaiterConfig={"Delay": 1, "MaxAttempts": 20})
             assert table not in set(ddb.list_tables(Limit=100).get("TableNames", []))

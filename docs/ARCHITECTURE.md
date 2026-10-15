@@ -57,11 +57,11 @@ Each service page calls its own adapter. CloudWatch Logs and Metrics, and API Ga
 ## Resource Safety
 
 - Create names are checked for collisions before create requests.
-- S3 upload checks that the bucket exists and refuses an existing object key.
-- DynamoDB sample writes are limited to String-`pk` tables created by the current dashboard process and refuse to overwrite an existing key.
+- S3 upload checks that the bucket exists and refuses an existing object key. Bucket deletion is restricted to empty buckets created by the current dashboard process.
+- DynamoDB JSON item writes, scans, and destructive actions are limited to tables created by the current dashboard process. Writes refuse duplicate keys unless the user explicitly confirms a replacement; item and table deletes require exact confirmation. Dashboard-created tables currently use one String partition key named `pk`; scans return at most 100 items per page.
 - SNS publish is blocked when any topic subscription exists; it is checked again immediately before publish.
 - SQS accepts only queue URLs at the local Floci endpoint. Receipt handles remain server-side and are returned to the browser only through short-lived opaque delete tokens.
 - Destructive object, message, and REST API actions require a typed exact-value confirmation. REST API deletion is limited to APIs created during the current dashboard process.
 - The app has no delete-all route and does not automatically remove dashboard-created resources.
 
-Dashboard ownership markers and recent-operation history live in Flask process memory. After a Flask restart, existing DynamoDB tables and APIs remain visible but ownership-restricted sample writes/API deletion are unavailable through the app. Floci currently defaults to in-memory storage, so a Floci restart has separate state-loss implications.
+Dashboard ownership markers and recent-operation history live in Flask process memory. After a Flask restart, existing S3 buckets and DynamoDB tables remain visible but ownership-restricted bucket/table actions are unavailable through the app. Floci currently defaults to in-memory storage, so a Floci restart has separate state-loss implications.

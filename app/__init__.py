@@ -26,6 +26,7 @@ def create_app(test_config=None):
     app.extensions["floci_config"] = config
     app.extensions["aws_clients"] = ClientProvider(config)
     app.extensions["recent_operations"] = []
+    app.extensions["console_created_buckets"] = set()
     app.extensions["console_created_tables"] = set()
     app.extensions["console_created_apis"] = set()
     app.extensions["console_created_instances"] = set()

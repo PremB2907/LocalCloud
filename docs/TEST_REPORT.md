@@ -22,7 +22,7 @@ Mocked unit tests (2026-10-13 run):
 
 One new test was added in this session (`test_sns_blocked_publish_is_recorded_in_operations_log`).
 
-Full follow-up on 2026-10-15 after the service usability changes: **42 passed, 12 skipped**. The opt-in live Floci integration file also passed: **11 passed**, covering create/use/cleanup flows for the eight dashboard services.
+Full follow-up on 2026-10-15 after the service usability changes: **42 passed, 12 skipped**. Following the S3 and DynamoDB workflow expansion, the focused route suite passed (**34 passed, 11 deselected**) and the live Floci integration suite passed (**12 passed, 45 deselected**), including empty-bucket deletion, JSON item scan/replace/delete, and table cleanup.
 
 Focused live follow-up (2026-10-15):
 
@@ -48,8 +48,8 @@ The seven live tests cover all eight read-only service routes and workflow cases
 
 | Service | Live operations verified | Actual inventory / limits |
 |---|---|---|
-| S3 | List/create bucket; upload; list objects; `HeadObject`; download/content equality; exact-key confirmed delete | Initial inventory empty. Path-style only was tested. Upload refuses to overwrite an existing object key. |
-| DynamoDB | `ListTables`, `DescribeTable`, create PAY_PER_REQUEST String-`pk` table, insert, consistent retrieve, duplicate-key refusal | Initial inventory empty. One simple String-key/item path only. |
+| S3 | List/create bucket; upload; list objects; `HeadObject`; download/content equality; exact-key confirmed object delete; exact-name confirmed delete of an empty dashboard-created bucket | Initial inventory empty. Path-style only was tested. Upload refuses to overwrite an existing object key; a non-empty bucket cannot be deleted. |
+| DynamoDB | `ListTables`, `DescribeTable`, create PAY_PER_REQUEST String-`pk` table; JSON PutItem with nested attributes/numbers; consistent retrieve; Scan; duplicate-key refusal; exact-`pk` confirmed replace/delete; exact-name confirmed table deletion | Initial inventory empty. Dashboard-created tables use one String partition key named `pk`; Scan pages are capped at 100 items. |
 | SQS | List queues; create standard queue; attributes; send; receive; body match; exact-message confirmed delete; typed, session-owned queue deletion | Initial inventory empty. Receipt handle stayed server-side in app tests. FIFO was not tested. |
 | SNS | List topics; create temporary topic; publish with no subscriptions; create/list email subscription; publish to a local SQS subscription; typed topic deletion | Local SQS fan-out is verified. Email subscription creation is verified, but email delivery is not supported by the dashboard. |
 | Lambda | Create inline-source function; inspect configuration; invoke; typed, session-owned deletion | One local function completed its invocation and cleanup. Docker socket access is required. |
@@ -61,13 +61,13 @@ Initial read-only probes for each service area returned HTTP 200. At that time e
 
 Live EC2 shell workflow (`test_ec2_dashboard_launch_stop_start_and_terminate`, 2026-10-15): passed. The test launched a temporary instance, verified the returned `docker exec` shell command by running a command inside that instance's container, then stopped, restarted, and terminated it.
 
-Live SQS/SNS and CloudWatch dashboard workflows (2026-10-15): local SNS-to-SQS delivery passed, including confirmed cleanup of both resources; CloudWatch dashboard group/stream/event creation, readback, and confirmed cleanup passed.
+Live SQS/SNS and CloudWatch dashboard workflows (2026-10-15): local SNS-to-SQS delivery passed, including confirmed cleanup of both resources; CloudWatch dashboard group/stream/event creation, readback, and confirmed cleanup passed. Latest live integration run also passed the expanded S3 and DynamoDB workflows, with all created resources cleaned up.
 
 ## Browser Checks
 
 - Overview showed Floci `2.2.0`, live counts, actual empty states, and validation evidence.
-- S3 bucket creation/upload/list/metadata/download/delete was exercised. The download route returned HTTP 200; the integration test verified the exact response bytes. Exact-key confirmation remained disabled until the requested key was typed.
-- DynamoDB table creation, item insertion, and retrieval returned the expected typed item.
+- S3 bucket creation/upload/list/metadata/download/delete was exercised. The download route returned HTTP 200; the integration test verified the exact response bytes, rejected deleting the non-empty bucket, then deleted its object and empty bucket.
+- DynamoDB table creation, JSON item insertion/retrieval/scan, confirmed replacement, item deletion, and confirmed table cleanup passed against live Floci.
 - SQS queue creation, send, receive, and delete passed. The browser received no raw receipt handle; deletion required the exact message ID.
 - SNS topic creation/publish passed with the `PUBLISH` typed confirmation and server-side no-subscription check.
 - API Gateway REST create/resource inspection/delete passed with exact-name confirmation; the HTTP API/Lambda route invoke workflow returned the expected local response.
@@ -79,4 +79,4 @@ All browser-created resources were cleaned up after verification, and the tempor
 
 ## Remaining Gaps
 
-EC2 is container-backed rather than a full virtual machine, and SSH key injection failed on this Docker Desktop setup; use the dashboard's local Docker shell command instead. CloudWatch metric statistics were not tested because no metrics existed. API Gateway REST deployment remains unvalidated. IAM enforcement, S3 virtual-hosted addressing, SQS FIFO, SNS email/HTTP/Lambda delivery, pagination with large inventories, and full service parity were not tested.
+EC2 is container-backed rather than a full virtual machine, and SSH key injection failed on this Docker Desktop setup; use the dashboard's local Docker shell command instead. CloudWatch metric statistics were not tested because no metrics existed. API Gateway REST deployment remains unvalidated. IAM enforcement, S3 virtual-hosted addressing, DynamoDB composite keys, SQS FIFO, SNS email/HTTP/Lambda delivery, pagination with large inventories, and full service parity were not tested.

@@ -16,11 +16,43 @@ def test_index_and_catalog_are_available(app):
         for service, metadata in response.json.items()
     }
     assert operations["sns"]["Subscribe"] == "passed"
+    assert any(
+        "does not send confirmation emails" in limitation
+        for limitation in response.json["sns"]["limitations"]
+    )
     assert operations["api_gateway"]["GetApis"] == "passed"
     assert operations["api_gateway"]["GetRoutes"] == "passed"
     assert operations["api_gateway"]["CreateApi"] == "passed"
     assert operations["api_gateway"]["CreateRoute"] == "passed"
     assert operations["api_gateway"]["Invoke"] == "passed"
+
+
+def test_s3_download_adds_content_type_extension_when_key_has_none(app, monkeypatch):
+    from io import BytesIO
+
+    content = b"%PDF-1.7 demo"
+
+    class FakeBody(BytesIO):
+        pass
+
+    class FakeS3Client:
+        def get_object(self, **kwargs):
+            assert kwargs == {"Bucket": "bucketraji", "Key": "demo"}
+            return {"Body": FakeBody(content)}
+
+    monkeypatch.setattr("app.routes._client", lambda _name: FakeS3Client())
+    monkeypatch.setattr("app.routes.s3.object_metadata", lambda *_args: {
+        "content_length": len(content),
+        "content_type": "application/pdf",
+    })
+    response = app.test_client().get(
+        "/api/services/s3/buckets/bucketraji/objects/demo/download"
+    )
+
+    assert response.status_code == 200
+    assert response.data == content
+    assert response.mimetype == "application/pdf"
+    assert "filename=demo.pdf" in response.headers["Content-Disposition"]
 
 
 def test_unknown_service_is_not_misreported_as_success(app):
@@ -69,6 +101,95 @@ def test_s3_object_delete_requires_exact_confirmation(app, monkeypatch):
     response = client.post("/api/services/s3/objects/delete", json={"bucket": "some-bucket", "key": "file.txt"})
     assert response.status_code == 400
     assert called == []
+
+
+def test_s3_bucket_delete_requires_ownership_and_exact_confirmation(app, monkeypatch):
+    called = []
+
+    class FakeS3Client:
+        def delete_bucket(self, **kwargs):
+            called.append(kwargs)
+            return {"ResponseMetadata": {"HTTPStatusCode": 204}}
+
+    monkeypatch.setattr("app.routes.s3.delete_empty_bucket", lambda client, name: client.delete_bucket(Bucket=name))
+    monkeypatch.setattr("app.routes._client", lambda _name: FakeS3Client())
+    client = app.test_client()
+    payload = {"name": "localcloud-demo-bucket", "confirmed": True, "confirm_value": "localcloud-demo-bucket"}
+    denied = client.post("/api/services/s3/buckets/delete", json=payload)
+    assert denied.status_code == 403
+    assert called == []
+
+    app.extensions["console_created_buckets"].add(payload["name"])
+    payload["confirm_value"] = "wrong"
+    unconfirmed = client.post("/api/services/s3/buckets/delete", json=payload)
+    assert unconfirmed.status_code == 400
+    assert called == []
+
+    payload["confirm_value"] = payload["name"]
+    deleted = client.post("/api/services/s3/buckets/delete", json=payload)
+    assert deleted.status_code == 200
+    assert called == [{"Bucket": payload["name"]}]
+    assert payload["name"] not in app.extensions["console_created_buckets"]
+
+
+def test_dynamodb_json_item_requires_confirmation_to_overwrite(app, monkeypatch):
+    calls = []
+    class FakeDynamoClient:
+        def put_item(self, **kwargs):
+            calls.append(kwargs)
+            return {"ResponseMetadata": {"HTTPStatusCode": 200}}
+
+    monkeypatch.setattr("app.routes.dynamodb.put_json_item", lambda client, table, item, overwrite=False: client.put_item(TableName=table, Item=item, Overwrite=overwrite))
+    monkeypatch.setattr("app.routes._client", lambda _name: FakeDynamoClient())
+    app.extensions["console_created_tables"].add("localcloud-demo-table")
+    client = app.test_client()
+    item = {"pk": "item-1", "count": 1}
+
+    invalid = client.post("/api/services/dynamodb/items", json={
+        "table": "localcloud-demo-table", "item": item, "overwrite": True,
+    })
+    assert invalid.status_code == 400
+    assert calls == []
+
+    replaced = client.post("/api/services/dynamodb/items", json={
+        "table": "localcloud-demo-table",
+        "item": item,
+        "overwrite": True,
+        "confirmed": True,
+        "confirm_value": item["pk"],
+    })
+    assert replaced.status_code == 201
+    assert calls == [{
+        "TableName": "localcloud-demo-table",
+        "Item": item,
+        "Overwrite": True,
+    }]
+
+
+def test_dynamodb_scan_and_item_delete_are_session_owned_and_confirmed(app, monkeypatch):
+    called = []
+    monkeypatch.setattr("app.routes.dynamodb.scan_items", lambda *args, **kwargs: called.append(("scan", args, kwargs)) or {"items": [], "next_token": None})
+    monkeypatch.setattr("app.routes.dynamodb.delete_item", lambda *args: called.append(("delete", args)) or {"ResponseMetadata": {"HTTPStatusCode": 200}})
+    client = app.test_client()
+    denied = client.get("/api/services/dynamodb/items/scan?table=existing-user-table")
+    assert denied.status_code == 403
+    assert called == []
+
+    app.extensions["console_created_tables"].add("localcloud-demo-table")
+    scanned = client.get("/api/services/dynamodb/items/scan?table=localcloud-demo-table")
+    assert scanned.status_code == 200
+    unconfirmed = client.post("/api/services/dynamodb/items/delete", json={
+        "table": "localcloud-demo-table", "pk": "item-1",
+    })
+    assert unconfirmed.status_code == 400
+    deleted = client.post("/api/services/dynamodb/items/delete", json={
+        "table": "localcloud-demo-table", "pk": "item-1",
+        "confirmed": True, "confirm_value": "item-1",
+    })
+    assert deleted.status_code == 200
+    assert called[0][0] == "scan"
+    assert called[1][0] == "delete"
+    assert called[1][1][1:] == ("localcloud-demo-table", "item-1")
 
 
 def test_queue_url_cannot_target_external_hosts(app, monkeypatch):
