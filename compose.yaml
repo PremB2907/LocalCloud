@@ -7,5 +7,5 @@ services:
       # Required for Floci EC2 (Docker-backed instances) and Lambda (container execution).
       # Linux / WSL2 backend:
       - /var/run/docker.sock:/var/run/docker.sock
-      # Windows named pipe (Docker Desktop Windows containers):
-      - //./pipe/docker_engine://./pipe/docker_engine
+      # Docker Desktop on Windows/macOS also exposes /var/run/docker.sock to Linux
+      # containers, so no extra mapping is needed there.

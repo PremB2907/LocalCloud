@@ -377,21 +377,6 @@ def test_ec2_connection_route_rejects_malformed_instance_id(app, monkeypatch):
     assert response.status_code == 400
 
 
-def test_ec2_connection_route_returns_local_container_shell(app, monkeypatch):
-    monkeypatch.setattr(
-        "app.routes.ec2.instance_shell",
-        lambda _client, instance_id: {
-            "instance_id": instance_id,
-            "container_name": "floci-aws-ec2-i-abc123",
-            "command": "docker exec -it floci-aws-ec2-i-abc123 /bin/sh",
-            "note": "Local container shell",
-        },
-    )
-    response = app.test_client().get("/api/services/ec2/instances/i-abc123/connect")
-    assert response.status_code == 200
-    assert response.json["connection"]["container_name"] == "floci-aws-ec2-i-abc123"
-    assert response.json["connection"]["command"] == "docker exec -it floci-aws-ec2-i-abc123 /bin/sh"
-
 
 def test_ec2_lifecycle_requires_instance_ids(app, monkeypatch):
     monkeypatch.setattr("app.routes._client", lambda _name: (_ for _ in ()).throw(AssertionError("client should not be called")))
@@ -517,3 +502,170 @@ def test_lambda_invoke_decodes_json_payload(app, monkeypatch):
     })
     assert response.status_code == 200, response.json
     assert response.json["result"]["payload"] == {"statusCode": 200, "body": "ok"}
+# ---------------------------------------------------------------------------
+# EC2 connect, key pairs, reboot
+# ---------------------------------------------------------------------------
+
+
+def _no_client(_name):
+    raise AssertionError("client should not be called")
+
+
+def test_ec2_run_instances_passes_key_name_and_ssh_user_data(app, monkeypatch):
+    seen = {}
+
+    class FakeEc2Client:
+        def run_instances(self, **kwargs):
+            seen.update(kwargs)
+            return {"Instances": [{"InstanceId": "i-abc123"}]}
+
+    monkeypatch.setattr("app.routes._client", lambda _name: FakeEc2Client())
+    response = app.test_client().post("/api/services/ec2/instances", json={
+        "image_id": "ami-ubuntu2204",
+        "instance_type": "t2.micro",
+        "key_name": "my-key",
+        "install_ssh": True,
+    })
+    assert response.status_code == 201, response.json
+    assert seen["KeyName"] == "my-key"
+    import base64
+    assert "sshd" in base64.b64decode(seen["UserData"]).decode()
+
+
+def test_ec2_run_instances_rejects_invalid_key_name(app, monkeypatch):
+    monkeypatch.setattr("app.routes._client", _no_client)
+    response = app.test_client().post("/api/services/ec2/instances", json={
+        "image_id": "ami-ubuntu2204",
+        "instance_type": "t2.micro",
+        "key_name": "bad/key",
+    })
+    assert response.status_code == 400
+
+
+def test_ec2_reboot_calls_reboot_instances(app, monkeypatch):
+    class FakeEc2Client:
+        def reboot_instances(self, **kwargs):
+            assert kwargs["InstanceIds"] == ["i-0abcdef1234567890"]
+            return {"ResponseMetadata": {"HTTPStatusCode": 200}}
+
+    monkeypatch.setattr("app.routes._client", lambda _name: FakeEc2Client())
+    response = app.test_client().post("/api/services/ec2/instances/reboot", json={
+        "instance_ids": ["i-0abcdef1234567890"],
+    })
+    assert response.status_code == 200, response.json
+
+
+def test_ec2_connect_rejects_invalid_instance_id(app, monkeypatch):
+    monkeypatch.setattr("app.routes._client", _no_client)
+    response = app.test_client().get("/api/services/ec2/instances/not-an-id/connect")
+    assert response.status_code == 400
+
+
+def test_ec2_connect_returns_ssh_command(app, monkeypatch):
+    monkeypatch.setattr("app.routes._client", lambda _name: object())
+    monkeypatch.setattr("app.routes.ec2.describe_instance", lambda _c, iid: {
+        "id": iid, "state": "running", "key_name": "my-key", "name": "web",
+    })
+    monkeypatch.setattr("app.routes.ec2.find_ssh_endpoint", lambda iid: {"container": f"floci-aws-ec2-{iid}", "port": 2201})
+    response = app.test_client().get("/api/services/ec2/instances/i-0abcdef1234567890/connect")
+    assert response.status_code == 200, response.json
+    assert response.json["ssh"]["command"] == "ssh -i my-key.pem -p 2201 root@127.0.0.1"
+
+
+def test_ec2_connect_without_docker_uses_placeholder_port(app, monkeypatch):
+    monkeypatch.setattr("app.routes._client", lambda _name: object())
+    monkeypatch.setattr("app.routes.ec2.describe_instance", lambda _c, iid: {"id": iid, "state": "running", "key_name": None})
+    monkeypatch.setattr("app.routes.ec2.find_ssh_endpoint", lambda iid: {"container": None, "port": None})
+    response = app.test_client().get("/api/services/ec2/instances/i-0abcdef1234567890/connect")
+    assert response.status_code == 200
+    assert "<ssh-port>" in response.json["ssh"]["command"]
+    assert "<key-pair>.pem" in response.json["ssh"]["command"]
+
+
+def test_ec2_command_validates_input(app, monkeypatch):
+    monkeypatch.setattr("app.routes._client", _no_client)
+    client = app.test_client()
+    assert client.post("/api/services/ec2/instances/command", json={"instance_id": "x", "command": "ls"}).status_code == 400
+    assert client.post("/api/services/ec2/instances/command", json={"instance_id": "i-0abcdef1234567890", "command": "  "}).status_code == 400
+    assert client.post("/api/services/ec2/instances/command", json={"instance_id": "i-0abcdef1234567890", "command": "x" * 5000}).status_code == 400
+    assert client.post("/api/services/ec2/instances/command", json={"instance_id": "i-0abcdef1234567890", "command": "ls", "cwd": "relative"}).status_code == 400
+
+
+def test_ec2_command_runs_ssm_and_tracks_cwd(app, monkeypatch):
+    seen = {}
+
+    def fake_run(_client, instance_id, script):
+        seen["script"] = script
+        return {"command_id": "c-1", "status": "Success", "finished": True, "exit_code": 0,
+                "stdout": "hello\n\n__LOCALCLOUD_CWD__/etc", "stderr": ""}
+
+    monkeypatch.setattr("app.routes._client", lambda _name: object())
+    monkeypatch.setattr("app.routes.ssm.run_shell_command", fake_run)
+    response = app.test_client().post("/api/services/ec2/instances/command", json={
+        "instance_id": "i-0abcdef1234567890", "command": "cd /etc; echo hello", "cwd": "/tmp/my dir",
+    })
+    assert response.status_code == 200, response.json
+    assert response.json["result"]["stdout"] == "hello\n"
+    assert response.json["result"]["cwd"] == "/etc"
+    assert seen["script"].startswith("cd '/tmp/my dir'")
+
+
+def test_ssm_run_shell_command_polls_until_complete():
+    from app.services import ssm
+
+    class FakeSsm:
+        def __init__(self):
+            self.calls = 0
+        def send_command(self, **kwargs):
+            assert kwargs["DocumentName"] == "AWS-RunShellScript"
+            return {"Command": {"CommandId": "c-1"}}
+        def get_command_invocation(self, **kwargs):
+            self.calls += 1
+            if self.calls < 3:
+                return {"Status": "InProgress"}
+            return {"Status": "Success", "ResponseCode": 0, "StandardOutputContent": "ok", "StandardErrorContent": ""}
+
+    fake = FakeSsm()
+    result = ssm.run_shell_command(fake, "i-0abcdef1234567890", "echo ok", sleep=lambda _s: None)
+    assert result["finished"] is True
+    assert result["exit_code"] == 0
+    assert result["stdout"] == "ok"
+    assert fake.calls == 3
+
+
+def test_key_pair_create_tracks_ownership_and_rejects_duplicates(app, monkeypatch):
+    class FakeEc2Client:
+        def describe_key_pairs(self, **kwargs):
+            return {"KeyPairs": [{"KeyName": "existing", "KeyPairId": "key-1"}]}
+        def create_key_pair(self, **kwargs):
+            return {"KeyName": kwargs["KeyName"], "KeyPairId": "key-2", "KeyFingerprint": "aa", "KeyMaterial": "PRIVATE"}
+
+    monkeypatch.setattr("app.routes._client", lambda _name: FakeEc2Client())
+    client = app.test_client()
+    assert client.post("/api/services/ec2/key-pairs", json={"name": "existing"}).status_code == 409
+    assert client.post("/api/services/ec2/key-pairs", json={"name": "bad/name"}).status_code == 400
+    response = client.post("/api/services/ec2/key-pairs", json={"name": "new-key"})
+    assert response.status_code == 201, response.json
+    assert response.json["resource"]["private_key"] == "PRIVATE"
+    assert response.headers["Cache-Control"] == "no-store"
+    assert "new-key" in app.extensions["console_created_key_pairs"]
+    assert "PRIVATE" not in client.get("/api/operations").get_data(as_text=True)
+
+
+def test_key_pair_delete_requires_ownership_and_confirmation(app, monkeypatch):
+    deleted = []
+
+    class FakeEc2Client:
+        def delete_key_pair(self, **kwargs):
+            deleted.append(kwargs["KeyName"])
+            return {"ResponseMetadata": {"HTTPStatusCode": 200}}
+
+    monkeypatch.setattr("app.routes._client", lambda _name: FakeEc2Client())
+    client = app.test_client()
+    assert client.post("/api/services/ec2/key-pairs/delete", json={"name": "k", "confirmed": True, "confirm_value": "k"}).status_code == 403
+    app.extensions["console_created_key_pairs"].add("k")
+    assert client.post("/api/services/ec2/key-pairs/delete", json={"name": "k", "confirmed": True, "confirm_value": "x"}).status_code == 400
+    response = client.post("/api/services/ec2/key-pairs/delete", json={"name": "k", "confirmed": True, "confirm_value": "k"})
+    assert response.status_code == 200, response.json
+    assert deleted == ["k"]
+    assert "k" not in app.extensions["console_created_key_pairs"]

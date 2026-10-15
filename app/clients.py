@@ -9,6 +9,7 @@ SERVICE_CLIENTS = {
     "sns": "sns",
     "lambda": "lambda",
     "ec2": "ec2",
+    "ssm": "ssm",
     "cloudwatch": "cloudwatch",
     "logs": "logs",
     "apigateway": "apigateway",

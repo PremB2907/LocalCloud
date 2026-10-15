@@ -52,7 +52,7 @@ Only HTTP loopback endpoints are accepted. Flask trusts loopback Host names only
 
 Each service page calls its own adapter. CloudWatch Logs and Metrics, and API Gateway v1 and v2, are queried independently so a failed subservice is shown as unavailable without hiding successful sibling data. Empty arrays are rendered as empty inventory, not as proof that an operation is unsupported.
 
-`catalog.py` links to the official Floci 2.2.0 service reference and labels tested operations separately from unvalidated operations. The dashboard exposes no Lambda invoke or EC2 lifecycle operation. Floci's documented EC2 instances are Docker-backed local containers rather than public VMs; the active Compose file does not mount the Docker socket required for Lambda/EC2 execution.
+`catalog.py` links to the official Floci 2.2.0 service reference and labels tested operations separately from unvalidated operations. Floci's documented EC2 instances are Docker-backed local containers rather than public VMs; `compose.yaml` mounts the Docker socket required for Lambda/EC2 execution. EC2 Connect uses SSM Run Command (`app/services/ssm.py`) for the browser terminal and the Floci-published SSH host port (found through the instance container's Docker labels) for SSH instructions. Private key material is returned once from key pair creation with `Cache-Control: no-store` and is never stored or recorded in the operation log.
 
 ## Resource Safety
 

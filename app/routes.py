@@ -1,6 +1,7 @@
 import json
 import re
 import secrets
+import shlex
 import time
 from datetime import datetime
 from io import BytesIO
@@ -13,7 +14,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 from flask import Blueprint, current_app, jsonify, render_template, request, send_file
 
 from app import catalog
-from app.services import api_gateway, cloudwatch, dynamodb, ec2, lambda_functions, s3, sns, sqs
+from app.services import api_gateway, cloudwatch, dynamodb, ec2, lambda_functions, s3, sns, sqs, ssm
 
 
 console = Blueprint("console", __name__)
@@ -31,6 +32,9 @@ INSTANCE_TYPE_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9]*\.[A-Za-z0-9]+$")
 LOG_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_./#-]{1,512}$")
 RUNTIME_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
 HANDLER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*$")
+KEY_NAME_PATTERN = re.compile(r"^[A-Za-z0-9 ._-]{1,255}$")
+CWD_MARKER = "__LOCALCLOUD_CWD__"
+MAX_COMMAND_LENGTH = 4096
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 MAX_LAMBDA_CODE_BYTES = 256 * 1024
 
@@ -147,8 +151,16 @@ def _load_service(service_name):
     if service_name == "lambda":
         return {"functions": lambda_functions.list_functions(clients.get("lambda"))}
     if service_name == "ec2":
-        client = clients.get("ec2")
-        return {"instances": ec2.list_instances(client)}
+        ec2_client = clients.get("ec2")
+        owned_keys = current_app.extensions["console_created_key_pairs"]
+        try:
+            key_pairs = {"ok": True, "key_pairs": [
+                {**key, "console_owned": key["name"] in owned_keys} for key in ec2.list_key_pairs(ec2_client)
+            ]}
+        except (ClientError, BotoCoreError) as error:
+            detail, status = _safe_error(error)
+            key_pairs = {"ok": False, "error": detail, "http_status": status, "key_pairs": []}
+        return {"instances": ec2.list_instances(ec2_client), "key_pairs": key_pairs}
     if service_name == "cloudwatch":
         data = {}
         for key, service_client, loader in (
@@ -894,16 +906,6 @@ def post_http_api_invoke():
 # ---------------------------------------------------------------------------
 
 
-@console.get("/api/services/ec2/instances/<instance_id>/connect")
-def get_ec2_instance_connection(instance_id):
-    if not INSTANCE_ID_PATTERN.fullmatch(instance_id):
-        return jsonify({"ok": False, "error": {"code": "ValidationError", "message": "Enter a valid instance ID."}}), 400
-    try:
-        connection = ec2.instance_shell(_client("ec2"), instance_id)
-        return jsonify({"ok": True, "connection": connection})
-    except (ClientError, BotoCoreError, LookupError, ValueError) as error:
-        return _operation_error(error)
-
 
 @console.post("/api/services/ec2/instances")
 def post_ec2_instances():
@@ -912,6 +914,8 @@ def post_ec2_instances():
     instance_type = payload.get("instance_type", "")
     name = payload.get("name", "")
     count = payload.get("count", 1)
+    key_name = payload.get("key_name") or None
+    install_ssh = payload.get("install_ssh", False)
     if not isinstance(image_id, str) or not AMI_ID_PATTERN.fullmatch(image_id):
         return jsonify({"ok": False, "error": {"code": "ValidationError", "message": "Enter a valid AMI ID (ami-...)."}}), 400
     if not isinstance(instance_type, str) or not INSTANCE_TYPE_PATTERN.fullmatch(instance_type):
@@ -920,13 +924,14 @@ def post_ec2_instances():
         return jsonify({"ok": False, "error": {"code": "ValidationError", "message": "Count must be an integer between 1 and 10."}}), 400
     if name and (not isinstance(name, str) or len(name) > 128):
         return jsonify({"ok": False, "error": {"code": "ValidationError", "message": "Instance name must be 128 characters or fewer."}}), 400
+    if key_name is not None and (not isinstance(key_name, str) or not KEY_NAME_PATTERN.fullmatch(key_name)):
+        return jsonify({"ok": False, "error": {"code": "ValidationError", "message": "Enter a valid key pair name."}}), 400
+    if not isinstance(install_ssh, bool):
+        return jsonify({"ok": False, "error": {"code": "ValidationError", "message": "install_ssh must be true or false."}}), 400
     try:
         result = ec2.run_instances(
-            _client("ec2"),
-            image_id,
-            instance_type,
-            name or None,
-            count,
+            _client("ec2"), image_id, instance_type, name or None, count,
+            key_name=key_name, install_ssh=install_ssh,
         )
         for instance_id in result["instance_ids"]:
             current_app.extensions["console_created_instances"].add(instance_id)
@@ -945,10 +950,8 @@ def _ec2_lifecycle(action, service_call, operation_label):
     if any(not isinstance(iid, str) or not INSTANCE_ID_PATTERN.fullmatch(iid) for iid in instance_ids):
         return jsonify({"ok": False, "error": {"code": "ValidationError", "message": "Each instance ID must match i-... ."}}), 400
     owned = current_app.extensions["console_created_instances"]
-    if action != "terminate":
-        # Start/Stop are allowed on any visible instance; terminate requires ownership.
-        pass
-    else:
+    # Start/Stop/Reboot are allowed on any visible instance; terminate requires ownership.
+    if action == "terminate":
         unowned = [iid for iid in instance_ids if iid not in owned]
         if unowned:
             return jsonify({"ok": False, "error": {"code": "InstanceNotOwnedByConsole", "message": "Only instances created in this dashboard session can be terminated here."}}), 403
@@ -974,9 +977,116 @@ def post_ec2_stop():
     return _ec2_lifecycle("stop", ec2.stop_instances, "StopInstances")
 
 
+@console.post("/api/services/ec2/instances/reboot")
+def post_ec2_reboot():
+    return _ec2_lifecycle("reboot", ec2.reboot_instances, "RebootInstances")
+
+
 @console.post("/api/services/ec2/instances/terminate")
 def post_ec2_terminate():
     return _ec2_lifecycle("terminate", ec2.terminate_instances, "TerminateInstances")
+
+
+@console.get("/api/services/ec2/instances/<instance_id>/connect")
+def get_ec2_connect(instance_id):
+    if not INSTANCE_ID_PATTERN.fullmatch(instance_id):
+        return jsonify({"ok": False, "error": {"code": "ValidationError", "message": "Instance ID must match i-... ."}}), 400
+    try:
+        instance = ec2.describe_instance(_client("ec2"), instance_id)
+    except (ClientError, BotoCoreError, LookupError) as error:
+        return _operation_error(error)
+    endpoint = ec2.find_ssh_endpoint(instance_id)
+    key_file = f"{instance['key_name']}.pem" if instance.get("key_name") else "<key-pair>.pem"
+    port = endpoint["port"]
+    return jsonify({
+        "ok": True,
+        "instance": instance,
+        "ssh": {
+            "user": ec2.SSH_USER,
+            "host": ec2.SSH_HOST,
+            "port": port,
+            "key_name": instance.get("key_name"),
+            "container": endpoint["container"],
+            "command": f"ssh -i {shlex.quote(key_file)} -p {port or '<ssh-port>'} {ec2.SSH_USER}@{ec2.SSH_HOST}",
+        },
+    })
+
+
+@console.post("/api/services/ec2/instances/command")
+def post_ec2_command():
+    payload = _body()
+    instance_id = payload.get("instance_id", "")
+    command = payload.get("command", "")
+    cwd = payload.get("cwd") or "/"
+    if not isinstance(instance_id, str) or not INSTANCE_ID_PATTERN.fullmatch(instance_id):
+        return jsonify({"ok": False, "error": {"code": "ValidationError", "message": "Instance ID must match i-... ."}}), 400
+    if not isinstance(command, str) or not command.strip() or len(command) > MAX_COMMAND_LENGTH:
+        return jsonify({"ok": False, "error": {"code": "ValidationError", "message": f"Enter a command of at most {MAX_COMMAND_LENGTH} characters."}}), 400
+    if not isinstance(cwd, str) or not cwd.startswith("/") or len(cwd) > 1024 or "\n" in cwd:
+        return jsonify({"ok": False, "error": {"code": "ValidationError", "message": "Working directory must be an absolute path."}}), 400
+    script = (
+        f"cd {shlex.quote(cwd)} 2>/dev/null || cd /\n"
+        f"{command}\n"
+        "__lc_rc=$?\n"
+        f"printf '\\n{CWD_MARKER}%s' \"$(pwd)\"\n"
+        "exit $__lc_rc"
+    )
+    try:
+        result = ssm.run_shell_command(_client("ssm"), instance_id, script)
+    except (ClientError, BotoCoreError) as error:
+        _record_operation("SendCommand", instance_id, "Failed")
+        return _operation_error(error)
+    stdout = result["stdout"] or ""
+    new_cwd = cwd
+    marker_at = stdout.rfind(CWD_MARKER)
+    if marker_at != -1:
+        new_cwd = stdout[marker_at + len(CWD_MARKER):].strip() or cwd
+        stdout = stdout[:marker_at]
+        if stdout.endswith("\n"):
+            stdout = stdout[:-1]
+    result.update({"stdout": stdout, "cwd": new_cwd})
+    _record_operation("SendCommand", instance_id, "Succeeded" if result["status"] == "Success" else result["status"])
+    return jsonify({"ok": True, "result": result})
+
+
+@console.post("/api/services/ec2/key-pairs")
+def post_ec2_key_pair():
+    name = _body().get("name", "")
+    if not isinstance(name, str) or not KEY_NAME_PATTERN.fullmatch(name) or name != name.strip():
+        return jsonify({"ok": False, "error": {"code": "ValidationError", "message": "Key pair names use letters, numbers, spaces, dots, dashes, and underscores."}}), 400
+    try:
+        client = _client("ec2")
+        if any(key["name"] == name for key in ec2.list_key_pairs(client)):
+            return jsonify({"ok": False, "error": {"code": "KeyPairAlreadyExists", "message": "A key pair with this name already exists."}}), 409
+        result = ec2.create_key_pair(client, name)
+        current_app.extensions["console_created_key_pairs"].add(name)
+        _record_operation("CreateKeyPair", name, "Succeeded")
+        response = jsonify({"ok": True, "resource": result, "http_status": 201})
+        response.headers["Cache-Control"] = "no-store"
+        return response, 201
+    except (ClientError, BotoCoreError) as error:
+        _record_operation("CreateKeyPair", name, "Failed")
+        return _operation_error(error)
+
+
+@console.post("/api/services/ec2/key-pairs/delete")
+def post_ec2_key_pair_delete():
+    payload = _body()
+    name = payload.get("name", "")
+    if not isinstance(name, str) or not KEY_NAME_PATTERN.fullmatch(name):
+        return jsonify({"ok": False, "error": {"code": "ValidationError", "message": "Enter a valid key pair name."}}), 400
+    if name not in current_app.extensions["console_created_key_pairs"]:
+        return jsonify({"ok": False, "error": {"code": "KeyPairNotOwnedByConsole", "message": "Only key pairs created in this dashboard session can be deleted here."}}), 403
+    if not _confirmation(payload, name):
+        return jsonify({"ok": False, "error": {"code": "ConfirmationRequired", "message": "Confirm the exact key pair name before deletion."}}), 400
+    try:
+        response = ec2.delete_key_pair(_client("ec2"), name)
+        current_app.extensions["console_created_key_pairs"].discard(name)
+        _record_operation("DeleteKeyPair", name, "Succeeded")
+        return jsonify({"ok": True, "http_status": response["ResponseMetadata"]["HTTPStatusCode"]})
+    except (ClientError, BotoCoreError) as error:
+        _record_operation("DeleteKeyPair", name, "Failed")
+        return _operation_error(error)
 
 
 # ---------------------------------------------------------------------------

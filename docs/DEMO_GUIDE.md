@@ -24,13 +24,17 @@ Open `http://127.0.0.1:5000`. The dashboard binds to loopback. Verify Floci is r
 5. **SNS:** Create a topic and publish a test message only while it has no subscriptions. The UI asks for `PUBLISH`; the backend rechecks subscriptions before publishing.
 6. **CloudWatch:** Show live metric/log-group empty states, or inspect existing log groups, streams, and events if present. The dashboard does not generate metric data.
 7. **API Gateway:** Create a REST API, inspect its resources, then delete that session-owned API by typing its exact name. Creation does not deploy a stage or make a public endpoint.
-8. **Lambda / EC2:** Show actual function/instance inventories and the stated limitations. Do not claim invocation, guest OS boot, or a public VPS when those operations have not been tested.
+8. **Lambda:** Create a function from inline Python, invoke it, show the response, then delete the session-owned function by typing its exact name.
+9. **EC2:** Create a key pair (the `.pem` downloads once), launch an Ubuntu 22.04 instance with that key pair and **Install & start OpenSSH** ticked, then click **Connect**:
+   - *Browser terminal:* run `whoami`, `cd /etc && ls | head`, `uname -a`. Commands run through SSM Run Command; `cd` is remembered.
+   - *SSH client:* after ~1 minute (OpenSSH install), run `chmod 400 <key>.pem` and the copied `ssh -i <key>.pem -p <port> root@127.0.0.1` command from a terminal on the same machine.
+   Reboot, stop, and start the instance, then terminate it and delete the key pair. Instances are Docker containers, not public VMs.
 
 ## Cleanup
 
 Dashboard operations create Floci resources until explicitly removed or the memory-backed Floci container is restarted. There is no delete-all action. Record the exact resource name, ARN, or URL shown by the app.
 
-The UI exposes only selected-object deletion, selected received-message deletion, and current-process REST API deletion, all with exact-resource confirmation. It deliberately does not expose bucket/table/queue/topic deletion. To remove a demo-created resource, call the corresponding SDK operation with the exact recorded identifier: `s3.delete_bucket(Bucket="<exact-empty-demo-bucket>")`, `dynamodb.delete_table(TableName="<exact-demo-table>")`, `sqs.delete_queue(QueueUrl="<exact-demo-queue-url>")`, or `sns.delete_topic(TopicArn="<exact-demo-topic-arn>")`.
+The UI exposes only selected-object deletion, selected received-message deletion, and current-process REST API, Lambda function, EC2 instance, and EC2 key pair deletion, all with exact-resource confirmation. It deliberately does not expose bucket/table/queue/topic deletion. To remove a demo-created resource, call the corresponding SDK operation with the exact recorded identifier: `s3.delete_bucket(Bucket="<exact-empty-demo-bucket>")`, `dynamodb.delete_table(TableName="<exact-demo-table>")`, `sqs.delete_queue(QueueUrl="<exact-demo-queue-url>")`, or `sns.delete_topic(TopicArn="<exact-demo-topic-arn>")`.
 
 Do not replace those exact-resource calls with a broad list loop or delete-all operation. DynamoDB table/API ownership markers are process-local; after a dashboard restart those existing resources remain visible but ownership-restricted write/delete actions are unavailable in the app.
 

@@ -418,11 +418,10 @@ def test_ec2_dashboard_launch_stop_start_and_terminate(app):
         )
         connection = client.get(f"/api/services/ec2/instances/{instance_ids[0]}/connect")
         assert connection.status_code == 200, connection.json
-        shell = connection.json["connection"]
-        assert shell["container_name"] == f"floci-aws-ec2-{instance_ids[0]}"
-        assert shell["command"] == f"docker exec -it {shell['container_name']} /bin/sh"
+        container = connection.json["ssh"]["container"]
+        assert container == f"floci-aws-ec2-{instance_ids[0]}"
         result = subprocess.run(
-            ["docker", "exec", shell["container_name"], "/bin/sh", "-lc", "printf LocalCloudShellReady"],
+            ["docker", "exec", container, "/bin/sh", "-lc", "printf LocalCloudShellReady"],
             capture_output=True,
             check=False,
             text=True,
@@ -455,6 +454,69 @@ def test_ec2_dashboard_launch_stop_start_and_terminate(app):
                 for inst in reservation.get("Instances", [])
             }
             assert all(remaining.get(iid) == "terminated" for iid in instance_ids)
+
+
+def test_ec2_dashboard_key_pair_connect_command_and_reboot(app):
+    client = app.test_client()
+    ec2 = _client(app, "ec2")
+    key_name = f"lc-console-it-key-{_suffix()}"
+    instance_ids = []
+    key_created = False
+    try:
+        created = client.post("/api/services/ec2/key-pairs", json={"name": key_name})
+        assert created.status_code == 201, created.json
+        key_created = True
+        assert "PRIVATE KEY" in created.json["resource"]["private_key"]
+
+        launched = client.post("/api/services/ec2/instances", json={
+            # Floci 2.2.0 SSM wraps commands with GNU `timeout --kill-after`, which BusyBox (Alpine) lacks.
+            "image_id": "ami-ubuntu2204",
+            "instance_type": "t2.micro",
+            "name": f"lc-console-it-connect-{_suffix()}",
+            "key_name": key_name,
+            "install_ssh": False,
+        })
+        assert launched.status_code == 201, launched.json
+        instance_ids = launched.json["resource"]["instance_ids"]
+
+        deadline = time.time() + 60
+        state = None
+        while time.time() < deadline:
+            connect = client.get(f"/api/services/ec2/instances/{instance_ids[0]}/connect")
+            assert connect.status_code == 200, connect.json
+            state = connect.json["instance"]["state"]
+            if state == "running":
+                break
+            time.sleep(1)
+        assert state == "running"
+        assert connect.json["instance"]["key_name"] == key_name
+        assert connect.json["ssh"]["command"].startswith(f"ssh -i {key_name}.pem -p ")
+
+        command = client.post("/api/services/ec2/instances/command", json={
+            "instance_id": instance_ids[0], "command": "cd /tmp && echo localcloud-connect", "cwd": "/",
+        })
+        assert command.status_code == 200, command.json
+        assert command.json["result"]["status"] == "Success"
+        assert command.json["result"]["stdout"].strip() == "localcloud-connect"
+        assert command.json["result"]["cwd"] == "/tmp"
+
+        rebooted = client.post("/api/services/ec2/instances/reboot", json={"instance_ids": instance_ids})
+        assert rebooted.status_code == 200, rebooted.json
+
+        deleted = client.post("/api/services/ec2/key-pairs/delete", json={
+            "name": key_name, "confirmed": True, "confirm_value": key_name,
+        })
+        assert deleted.status_code == 200, deleted.json
+        key_created = False
+    finally:
+        if instance_ids:
+            ec2.terminate_instances(InstanceIds=instance_ids)
+        if key_created:
+            ec2.delete_key_pair(KeyName=key_name)
+        remaining_keys = {k["KeyName"] for k in ec2.describe_key_pairs().get("KeyPairs", [])}
+        assert key_name not in remaining_keys
+
+
 def test_lambda_dashboard_create_invoke_and_confirmed_delete(app):
     client = app.test_client()
     lmbda = _client(app, "lambda")

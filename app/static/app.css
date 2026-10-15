@@ -1254,6 +1254,70 @@ html[data-theme="dark"] .toast-message.is-error { background: #5a1111; }
 }
 
 /* ============================================================
+   EC2 CONNECT DIALOG
+   ============================================================ */
+
+.connect-dialog {
+  width: min(860px, calc(100vw - 32px));
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--r-xl);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  box-shadow: var(--shadow-xl);
+  animation: dialog-in var(--dur-slow) var(--ease-out);
+}
+.connect-dialog::backdrop { background: var(--bg-overlay); backdrop-filter: blur(4px); }
+.connect-header {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: var(--s4);
+  padding: var(--s5) var(--s6) var(--s3);
+}
+.connect-header h2 { font-size: var(--font-size-lg); font-weight: 700; }
+.connect-header p { font-size: var(--font-size-xs); color: var(--text-muted); margin-top: 2px; }
+.connect-tabs { display: flex; gap: var(--s1); padding: 0 var(--s6); border-bottom: 1px solid var(--border); }
+.connect-tab {
+  padding: var(--s2) var(--s3); border: none; border-bottom: 2px solid transparent; background: none;
+  color: var(--text-muted); font-size: var(--font-size-sm); font-weight: 600; cursor: pointer;
+}
+.connect-tab.is-active { color: var(--text-primary); border-bottom-color: var(--border-focus); }
+.connect-body { padding: var(--s4) var(--s6) var(--s6); display: grid; gap: var(--s3); }
+#connect-ssh-panel { display: grid; gap: var(--s3); }
+#connect-ssh-panel[hidden] { display: none; }
+.terminal-output {
+  height: 340px; margin: 0; padding: var(--s3) var(--s4); overflow: auto;
+  border-radius: var(--r-md) var(--r-md) 0 0; background: #0b1220; color: #d7e3f4;
+  font-family: var(--font-mono); font-size: var(--font-size-sm); line-height: 1.5; white-space: pre-wrap; word-break: break-word;
+}
+.terminal-command { color: #7dd3fc; }
+.terminal-error { color: #fca5a5; }
+.terminal-muted { color: #7a8fa6; }
+.terminal-form {
+  display: flex; align-items: center; gap: var(--s2); padding: var(--s2) var(--s4);
+  border-radius: 0 0 var(--r-md) var(--r-md); background: #111a2e; border-top: 1px solid #1f2b44;
+}
+.terminal-prompt { color: #86efac; font-family: var(--font-mono); font-size: var(--font-size-sm); white-space: nowrap; }
+.terminal-input {
+  flex: 1; min-width: 0; border: none; background: transparent; color: #f1f5f9;
+  font-family: var(--font-mono); font-size: var(--font-size-sm); outline: none;
+}
+.terminal-input:disabled { opacity: .5; }
+.connect-note { font-size: var(--font-size-sm); color: var(--text-muted); line-height: 1.5; }
+.connect-command { display: grid; gap: var(--s1); }
+.connect-command-label { font-size: var(--font-size-xs); font-weight: 600; color: var(--text-secondary); }
+.connect-command-line {
+  display: flex; align-items: center; gap: var(--s2); padding: var(--s2) var(--s2) var(--s2) var(--s3);
+  border: 1px solid var(--border); border-radius: var(--r-md); background: var(--bg-code);
+}
+.connect-command-line code { flex: 1; min-width: 0; overflow-x: auto; white-space: nowrap; font-family: var(--font-mono); font-size: var(--font-size-sm); color: var(--text-code); }
+.copy-button { height: 28px; padding: 0 var(--s3); }
+.info-band {
+  padding: var(--s3) var(--s4); border: 1px solid var(--color-info-border); border-radius: var(--r-md);
+  background: var(--color-info-bg); color: var(--color-info); font-size: var(--font-size-sm);
+}
+.action-form .checkbox-label { display: flex; align-items: center; gap: var(--s2); min-height: 36px; }
+.action-form .checkbox-label input { width: auto; min-height: 0; }
+
+/* ============================================================
    COMMAND PALETTE
    ============================================================ */
 

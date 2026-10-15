@@ -505,7 +505,10 @@ function serviceCollections(key, data) {
   if (key === "sqs")     return [{ title: "Queues",     rows: data.queues,     columns: [["name","Queue"],["url","Queue URL",true]] }];
   if (key === "sns")     return [{ title: "Topics",     rows: data.topics,     columns: [["name","Topic"],["arn","Topic ARN",true]] }];
   if (key === "lambda")  return [{ title: "Functions",  rows: data.functions,  columns: [["name","Function"],["runtime","Runtime"],["state","State"],["memory_size","Memory MB"],["timeout","Timeout s"],["handler","Handler"]] }];
-  if (key === "ec2")     return [{ title: "Instances",  rows: data.instances,  columns: [["id","Instance ID",true],["name","Name"],["state","State"],["instance_type","Type"],["image_id","AMI"],["launch_time","Launched"]] }];
+  if (key === "ec2")     return [
+    { title: "Instances", rows: data.instances, columns: [["id","Instance ID",true],["name","Name"],["state","State"],["instance_type","Type"],["image_id","AMI"],["private_ip","Private IP",true],["key_name","Key pair"],["launch_time","Launched"]] },
+    { title: "Key Pairs", rows: data.key_pairs.key_pairs, error: data.key_pairs.ok ? null : data.key_pairs.error.message, columns: [["name","Key pair"],["id","Key pair ID",true],["fingerprint","Fingerprint",true],["console_owned","Session-owned"]] },
+  ];
   if (key === "cloudwatch") return [
     { title: "Metrics",    rows: data.metrics.ok    ? data.metrics.metrics       : [], error: data.metrics.ok    ? null : data.metrics.error.message,    columns: [["namespace","Namespace"],["name","Metric"],["dimensions","Dimensions"]] },
     { title: "Log Groups", rows: data.log_groups.ok ? data.log_groups.log_groups : [], error: data.log_groups.ok ? null : data.log_groups.error.message, columns: [["name","Log group"],["stored_bytes","Stored bytes"],["retention_days","Retention"]] },
@@ -766,35 +769,59 @@ function serviceControls(key, data) {
 
   if (key === "ec2") {
     const amiOptions = [
-      { value: "ami-0abcdef1234567890", label: "Amazon Linux 2 (ami-0abcdef1234567890)" },
-      { value: "ami-0abcdef1234567891", label: "Amazon Linux 2023 (ami-0abcdef1234567891)" },
+      { value: "ami-ubuntu2204", label: "Ubuntu 22.04 (ami-ubuntu2204)" },
+      { value: "ami-ubuntu2404-amd64", label: "Ubuntu 24.04 (ami-ubuntu2404-amd64)" },
       { value: "ami-0abcdef1234567892", label: "Ubuntu 20.04 (ami-0abcdef1234567892)" },
+      { value: "ami-debian12", label: "Debian 12 (ami-debian12)" },
+      { value: "ami-0abcdef1234567891", label: "Amazon Linux 2023 (ami-0abcdef1234567891)" },
+      { value: "ami-0abcdef1234567890", label: "Amazon Linux 2 (ami-0abcdef1234567890)" },
       { value: "ami-alpine", label: "Alpine (ami-alpine)" },
     ].map((o) => `<option value="${escapeHtml(o.value)}">${escapeHtml(o.label)}</option>`).join("");
     const typeOptions = ["t2.micro", "t3.micro", "t3.small", "t3.medium", "m5.large"]
       .map((t) => `<option value="${t}">${t}</option>`).join("");
+    const keyPairs = data.key_pairs.key_pairs || [];
+    const keyOptions = `<option value="">Proceed without a key pair</option>` + keyPairs
+      .map((k) => `<option value="${escapeHtml(k.name)}">${escapeHtml(k.name)}</option>`).join("");
     const instanceRows = data.instances.map((inst) => {
-      const canConnect = inst.state === "running";
-      const actionBtns =
-        `<button class="secondary-button" data-action="ec2-connect" data-instance-id="${escapeHtml(inst.id)}" ${canConnect ? "" : "disabled"}>${canConnect ? "Open Shell" : "Not running"}</button>` +
-        `<button class="secondary-button" data-action="ec2-start" data-instance-id="${escapeHtml(inst.id)}">Start</button>` +
-        `<button class="secondary-button" data-action="ec2-stop" data-instance-id="${escapeHtml(inst.id)}">Stop</button>` +
+      const running = inst.state === "running";
+      const stopped = inst.state === "stopped";
+      const gone = inst.state === "terminated" || inst.state === "shutting-down";
+      const actionBtns = gone ? `<small class="mono">${escapeHtml(inst.state)}</small>` :
+        `<button class="primary-button" data-action="ec2-connect" data-instance-id="${escapeHtml(inst.id)}" ${running ? "" : "disabled"}>Connect</button>` +
+        `<button class="secondary-button" data-action="ec2-start" data-instance-id="${escapeHtml(inst.id)}" ${stopped ? "" : "disabled"}>Start</button>` +
+        `<button class="secondary-button" data-action="ec2-stop" data-instance-id="${escapeHtml(inst.id)}" ${running ? "" : "disabled"}>Stop</button>` +
+        `<button class="secondary-button" data-action="ec2-reboot" data-instance-id="${escapeHtml(inst.id)}" ${running ? "" : "disabled"}>Reboot</button>` +
         `<button class="danger-button" data-action="ec2-terminate" data-instance-id="${escapeHtml(inst.id)}" data-instance-name="${escapeHtml(inst.name || inst.id)}">Terminate</button>`;
-      return `<div class="action-list-row"><span><strong>${escapeHtml(inst.id)}</strong>${inst.name ? ` <small>${escapeHtml(inst.name)}</small>` : ""}<small class="mono">${escapeHtml(inst.state)} · ${escapeHtml(inst.instance_type)} · Docker-backed local instance</small></span><div class="action-list-buttons">${actionBtns}</div></div>`;
+      const meta = [inst.state, inst.instance_type, inst.private_ip, inst.key_name ? `key: ${inst.key_name}` : null].filter(Boolean).map(escapeHtml).join(" · ");
+      return `<div class="action-list-row"><span><strong>${escapeHtml(inst.id)}</strong>${inst.name ? ` <small>${escapeHtml(inst.name)}</small>` : ""}<small class="mono">${meta}</small></span><div class="action-list-buttons">${actionBtns}</div></div>`;
     }).join("");
+    const keyRows = keyPairs.map((k) =>
+      `<div class="action-list-row"><span><strong>${escapeHtml(k.name)}</strong><small class="mono">${escapeHtml(k.fingerprint || "")}</small></span>` +
+      `<div class="action-list-buttons">${k.console_owned
+        ? `<button class="danger-button" data-action="delete-key-pair" data-key-name="${escapeHtml(k.name)}">Delete</button>`
+        : `<small>Not created in this session</small>`}</div></div>`
+    ).join("");
     return `
-      ${panel("Launch Instance", "Floci runs each instance as a local Docker container",
+      ${panel("Create Key Pair", "The private key (.pem) downloads once, at creation",
+        `<form class="action-form" data-action="create-key-pair">
+          <label>Key pair name<input name="name" required maxlength="255" pattern="[A-Za-z0-9 ._\\-]+" placeholder="localcloud-key" autocomplete="off"></label>
+          <button class="primary-button" type="submit">Create key pair</button>
+        </form>`
+      )}
+      ${keyRows ? `<section class="panel"><div class="panel-heading"><h3>Key Pair Actions</h3><span class="panel-meta">Delete (session-owned only)</span></div><div class="action-list">${keyRows}</div></section>` : ""}
+      ${panel("Launch Instance", "Floci launches a Docker container per instance",
         `<form class="action-form" data-action="run-instances">
           <label>AMI<select name="image_id" required>${amiOptions}</select></label>
           <label>Instance type<select name="instance_type" required>${typeOptions}</select></label>
           <label>Name (optional tag)<input name="name" maxlength="128" placeholder="localcloud-demo-instance" autocomplete="off"></label>
-          <span class="form-note">For a running instance, choose Open Shell and paste the displayed Docker command into PowerShell or a terminal.</span>
+          <label>Key pair (for SSH)<select name="key_name">${keyOptions}</select></label>
           <label>Count<select name="count"><option value="1" selected>1</option><option value="2">2</option><option value="3">3</option></select></label>
+          <label class="checkbox-label"><input type="checkbox" name="install_ssh" checked> Install &amp; start OpenSSH (user data)</label>
           <button class="primary-button" type="submit">Launch instance</button>
         </form>`
       )}
       ${data.instances.length
-        ? `<section class="panel"><div class="panel-heading"><h3>Instance Actions</h3><span class="panel-meta">Start · Stop · Terminate (session-owned only)</span></div><div class="action-list">${instanceRows}</div></section>`
+        ? `<section class="panel"><div class="panel-heading"><h3>Instance Actions</h3><span class="panel-meta">Connect · Start · Stop · Reboot · Terminate (session-owned only)</span></div><div class="action-list">${instanceRows}</div></section>`
         : ""}`;
   }
 
@@ -1141,7 +1168,15 @@ async function handleFormSubmit(event) {
       if (submitBtn && !wasDisabled) submitBtn.disabled = false;
       return;
     } else if (action === "run-instances") {
-      result = await postJson("/api/services/ec2/instances", { ...values, count: Number(values.count || 1) });
+      result = await postJson("/api/services/ec2/instances", {
+        ...values,
+        count: Number(values.count || 1),
+        key_name: values.key_name || null,
+        install_ssh: values.install_ssh === "on",
+      });
+    } else if (action === "create-key-pair") {
+      result = await postJson("/api/services/ec2/key-pairs", values);
+      downloadTextFile(`${result.resource.name}.pem`, result.resource.private_key);
     } else if (action === "create-function") {
       result = await postJson("/api/services/lambda/functions", {
         ...values,
@@ -1190,6 +1225,7 @@ function actionLabel(action) {
     "create-http-api":"CreateApi",
     "create-http-route":"CreateRoute",
     "run-instances":  "RunInstances",
+    "create-key-pair":"CreateKeyPair",
     "create-function":"CreateFunction",
     "invoke-function":"Invoke",
   })[action] || "Operation";
@@ -1343,16 +1379,24 @@ async function handleActionClick(event) {
       toast("StartInstances succeeded.");
       await navigate("ec2");
 
-    } else if (action === "ec2-connect") {
-      const result = await requestJson(`/api/services/ec2/instances/${encodeURIComponent(button.dataset.instanceId)}/connect`);
-      showDetail("Local Container Shell", [result.connection], [
-        ["command","Run this in PowerShell or a terminal"],
-        ["note","What opens"],
-      ]);
-
     } else if (action === "ec2-stop") {
       await postJson("/api/services/ec2/instances/stop", { instance_ids: [button.dataset.instanceId] });
       toast("StopInstances succeeded.");
+      await navigate("ec2");
+
+    } else if (action === "ec2-connect") {
+      await openConnectDialog(button.dataset.instanceId);
+
+    } else if (action === "ec2-reboot") {
+      await postJson("/api/services/ec2/instances/reboot", { instance_ids: [button.dataset.instanceId] });
+      toast("RebootInstances succeeded.");
+      await navigate("ec2");
+
+    } else if (action === "delete-key-pair") {
+      const name = button.dataset.keyName;
+      if (!await confirmExact("Delete Key Pair", "Removes only the key pair created in this session. Running instances keep their injected key.", name, "Delete key pair")) return;
+      await postJson("/api/services/ec2/key-pairs/delete", { name, confirmed: true, confirm_value: name });
+      toast("DeleteKeyPair succeeded.");
       await navigate("ec2");
 
     } else if (action === "ec2-terminate") {
@@ -1376,6 +1420,166 @@ async function handleActionClick(event) {
     button.disabled = false;
   }
 }
+
+/* =============================================================
+   EC2 CONNECT DIALOG
+   ============================================================= */
+
+function downloadTextFile(filename, content) {
+  const url = URL.createObjectURL(new Blob([content], { type: "application/x-pem-file" }));
+  const link = el("a", { href: url, download: filename });
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+const connectState = { instanceId: null, cwd: "/", history: [], historyIndex: 0, busy: false };
+
+function copyButton(text) {
+  const btn = el("button", { class: "secondary-button copy-button", type: "button" }, "Copy");
+  btn.addEventListener("click", async () => {
+    try { await navigator.clipboard.writeText(text); toast("Copied to clipboard."); }
+    catch { toast("Clipboard unavailable; select the text manually.", true); }
+  });
+  return btn;
+}
+
+function commandRow(label, command) {
+  return el("div", { class: "connect-command" },
+    el("span", { class: "connect-command-label" }, label),
+    el("div", { class: "connect-command-line" }, el("code", {}, command), copyButton(command))
+  );
+}
+
+function setConnectTab(tab) {
+  document.querySelectorAll("#connect-dialog [data-connect-tab]").forEach((b) => {
+    const active = b.dataset.connectTab === tab;
+    b.classList.toggle("is-active", active);
+    b.setAttribute("aria-selected", String(active));
+  });
+  document.querySelectorAll("#connect-dialog [data-connect-panel]").forEach((p) => {
+    p.hidden = p.dataset.connectPanel !== tab;
+  });
+  if (tab === "terminal") document.getElementById("terminal-input").focus();
+}
+
+function terminalPrompt() {
+  return `root@${connectState.instanceId}:${connectState.cwd}#`;
+}
+
+function appendTerminal(text, cls = "") {
+  const out = document.getElementById("terminal-output");
+  out.appendChild(el("span", { class: cls }, text));
+  out.scrollTop = out.scrollHeight;
+}
+
+function renderSshPanel(info) {
+  const panelEl = document.getElementById("connect-ssh-panel");
+  panelEl.innerHTML = "";
+  const ssh = info.ssh;
+  const keyFile = ssh.key_name ? `${ssh.key_name}.pem` : "<key-pair>.pem";
+  if (!ssh.key_name) {
+    panelEl.appendChild(el("div", { class: "warn-band" },
+      el("strong", {}, "No key pair"),
+      el("span", {}, " This instance was launched without a key pair, so no SSH key was injected. Launch a new instance with a key pair (and OpenSSH install enabled) to use SSH, or use the browser terminal.")
+    ));
+  }
+  panelEl.appendChild(el("p", { class: "connect-note" },
+    "Floci publishes the instance's SSH port (container port 22) on the Docker host. Connect as root with the private key downloaded when the key pair was created."
+  ));
+  panelEl.appendChild(commandRow("1. Restrict key permissions", `chmod 400 ${keyFile}`));
+  panelEl.appendChild(commandRow("2. Connect", ssh.command));
+  if (!ssh.port) {
+    const container = ssh.container || `$(docker ps -q --filter label=io.floci.resource-id=${info.instance.id})`;
+    panelEl.appendChild(el("div", { class: "info-band" },
+      "The dashboard could not read the SSH host port from Docker (Docker CLI missing or needs sudo). Find it with the command below, then replace <ssh-port>."
+    ));
+    panelEl.appendChild(commandRow("Find the SSH port", `sudo docker port ${container} 22`));
+  }
+  const execTarget = ssh.container || `$(sudo docker ps -q --filter label=io.floci.resource-id=${info.instance.id})`;
+  panelEl.appendChild(commandRow("Alternative: shell via Docker", `sudo docker exec -it ${execTarget} /bin/sh`));
+  panelEl.appendChild(el("p", { class: "connect-note" },
+    "OpenSSH is installed by user data at launch; on a fresh instance it can take a minute before sshd accepts connections."
+  ));
+}
+
+async function openConnectDialog(instanceId) {
+  const info = await requestJson(`/api/services/ec2/instances/${encodeURIComponent(instanceId)}/connect`);
+  const dialog = document.getElementById("connect-dialog");
+  connectState.instanceId = instanceId;
+  connectState.cwd = "/";
+  connectState.busy = false;
+  document.getElementById("connect-title").textContent = `Connect to ${info.instance.name || instanceId}`;
+  document.getElementById("connect-subtitle").textContent =
+    [instanceId, info.instance.state, info.instance.private_ip, info.instance.image_id].filter(Boolean).join(" · ");
+  const out = document.getElementById("terminal-output");
+  out.innerHTML = "";
+  appendTerminal(`LocalCloud browser terminal — commands run through SSM Run Command (AWS-RunShellScript).\nEach command runs non-interactively; cd is remembered. Interactive programs (vim, top) are not supported.\n\n`, "terminal-muted");
+  document.getElementById("terminal-prompt").textContent = terminalPrompt();
+  renderSshPanel(info);
+  setConnectTab("terminal");
+  if (!dialog.open) dialog.showModal();
+  document.getElementById("terminal-input").focus();
+}
+
+async function runTerminalCommand(command) {
+  if (connectState.busy) return;
+  const input = document.getElementById("terminal-input");
+  appendTerminal(`${terminalPrompt()} ${command}\n`, "terminal-command");
+  if (command === "clear") {
+    document.getElementById("terminal-output").innerHTML = "";
+    return;
+  }
+  connectState.busy = true;
+  input.disabled = true;
+  try {
+    const { result } = await postJson("/api/services/ec2/instances/command", {
+      instance_id: connectState.instanceId, command, cwd: connectState.cwd,
+    });
+    if (result.stdout) appendTerminal(result.stdout.endsWith("\n") ? result.stdout : `${result.stdout}\n`);
+    if (result.stderr) appendTerminal(result.stderr.endsWith("\n") ? result.stderr : `${result.stderr}\n`, "terminal-error");
+    if (!result.finished) appendTerminal(`[command still running after 30s — status ${result.status}, command ID ${result.command_id}]\n`, "terminal-muted");
+    else if (result.exit_code) appendTerminal(`[exit ${result.exit_code}]\n`, "terminal-muted");
+    connectState.cwd = result.cwd || connectState.cwd;
+  } catch (error) {
+    appendTerminal(`${error.code || "Error"}: ${error.message}\n`, "terminal-error");
+  } finally {
+    connectState.busy = false;
+    input.disabled = false;
+    document.getElementById("terminal-prompt").textContent = terminalPrompt();
+    input.focus();
+  }
+}
+
+document.getElementById("terminal-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const input = document.getElementById("terminal-input");
+  const command = input.value.trim();
+  if (!command) return;
+  connectState.history.push(command);
+  connectState.historyIndex = connectState.history.length;
+  input.value = "";
+  runTerminalCommand(command);
+});
+
+document.getElementById("terminal-input").addEventListener("keydown", (e) => {
+  const input = e.target;
+  if (e.key === "ArrowUp" && connectState.historyIndex > 0) {
+    e.preventDefault();
+    connectState.historyIndex -= 1;
+    input.value = connectState.history[connectState.historyIndex];
+  } else if (e.key === "ArrowDown") {
+    e.preventDefault();
+    connectState.historyIndex = Math.min(connectState.history.length, connectState.historyIndex + 1);
+    input.value = connectState.history[connectState.historyIndex] || "";
+  }
+});
+
+document.querySelectorAll("#connect-dialog [data-connect-tab]").forEach((b) =>
+  b.addEventListener("click", () => setConnectTab(b.dataset.connectTab))
+);
+document.getElementById("connect-close").addEventListener("click", () => document.getElementById("connect-dialog").close());
 
 /* =============================================================
    NAVIGATION

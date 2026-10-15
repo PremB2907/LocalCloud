@@ -33,6 +33,7 @@ def create_app(test_config=None):
     app.extensions["console_created_log_groups"] = set()
     app.extensions["console_created_queues"] = set()
     app.extensions["console_created_topics"] = set()
+    app.extensions["console_created_key_pairs"] = set()
     app.extensions["received_messages"] = {}
     app.register_blueprint(console)
     return app
