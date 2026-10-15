@@ -1,15 +1,4 @@
-import json
-
 from app.services.common import isoformat
-
-
-def _display_attribute(typed_value):
-    if not isinstance(typed_value, dict) or len(typed_value) != 1:
-        return str(typed_value)
-    attr_type, raw = next(iter(typed_value.items()))
-    if attr_type in {"M", "L"}:
-        return json.dumps(typed_value)
-    return str(raw)
 
 
 def create_test_table(client, table_name):
@@ -72,26 +61,4 @@ def describe_table(client, table_name):
         "attribute_definitions": table.get("AttributeDefinitions", []),
         "billing_mode": table.get("BillingModeSummary", {}).get("BillingMode", "PROVISIONED"),
         "creation_date": isoformat(table.get("CreationDateTime")),
-    }
-
-
-def delete_table(client, table_name):
-    """Delete a DynamoDB table."""
-    return client.delete_table(TableName=table_name)
-
-
-def scan_table(client, table_name, limit=50):
-    """Scan a table and return up to `limit` items."""
-    response = client.scan(TableName=table_name, Limit=limit)
-    items = response.get("Items", [])
-    flat_items = [
-        {key: _display_attribute(typed_value) for key, typed_value in item.items()}
-        for item in items
-    ]
-    return {
-        "items": flat_items,
-        "typed_items": items,
-        "count": response.get("Count", 0),
-        "scanned_count": response.get("ScannedCount", 0),
-        "has_more": "LastEvaluatedKey" in response,
     }

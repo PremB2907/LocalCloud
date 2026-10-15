@@ -28,12 +28,8 @@ def create_app(test_config=None):
     app.extensions["recent_operations"] = []
     app.extensions["console_created_tables"] = set()
     app.extensions["console_created_apis"] = set()
-    app.extensions["console_created_buckets"] = set()
-    app.extensions["console_created_queues"] = set()
-    app.extensions["console_created_topics"] = set()
-    app.extensions["console_created_functions"] = set()
     app.extensions["console_created_instances"] = set()
-    app.extensions["console_created_log_groups"] = set()
+    app.extensions["console_created_functions"] = set()
     app.extensions["received_messages"] = {}
     app.register_blueprint(console)
     return app

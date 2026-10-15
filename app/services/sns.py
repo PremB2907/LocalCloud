@@ -34,15 +34,5 @@ def topic_attributes(client, topic_arn):
     return response.get("Attributes", {})
 
 
-def delete_topic(client, topic_arn):
-    """Delete an SNS topic."""
-    return client.delete_topic(TopicArn=topic_arn)
-
-
-def list_subscriptions_by_topic(client, topic_arn):
-    """List all subscriptions for a topic."""
-    pages = client.get_paginator("list_subscriptions_by_topic").paginate(TopicArn=topic_arn)
-    subs = []
-    for page in pages:
-        subs.extend(page.get("Subscriptions", []))
-    return subs
+def subscribe(client, topic_arn, protocol, endpoint):
+    return client.subscribe(TopicArn=topic_arn, Protocol=protocol, Endpoint=endpoint)

@@ -11,6 +11,15 @@ def test_index_and_catalog_are_available(app):
     assert set(response.json) == {
         "s3", "dynamodb", "sqs", "sns", "lambda", "ec2", "cloudwatch", "api_gateway"
     }
+    operations = {
+        service: {operation["name"]: operation["validation"] for operation in metadata["operations"]}
+        for service, metadata in response.json.items()
+    }
+    assert operations["sns"]["Subscribe"] == "passed"
+    assert operations["api_gateway"]["GetApis"] == "passed"
+    assert operations["api_gateway"]["GetRoutes"] == "passed"
+    assert operations["api_gateway"]["CreateApi"] == "passed"
+    assert operations["api_gateway"]["Invoke"] == "not validated"
 
 
 def test_unknown_service_is_not_misreported_as_success(app):
@@ -155,49 +164,174 @@ def test_sns_blocked_publish_is_recorded_in_operations_log(app, monkeypatch):
     assert ops[0]["result"] == "Blocked"
 
 
-def test_s3_bucket_delete_is_limited_to_console_created_buckets(app, monkeypatch):
-    monkeypatch.setattr("app.routes.s3.delete_bucket", lambda *args: (_ for _ in ()).throw(AssertionError("delete should not run")))
-    response = app.test_client().post("/api/services/s3/buckets/delete", json={
-        "name": "preexisting-bucket",
-        "confirmed": True,
-        "confirm_value": "preexisting-bucket",
+# ---------------------------------------------------------------------------
+# EC2 lifecycle route safety
+# ---------------------------------------------------------------------------
+
+
+def test_ec2_run_instances_rejects_invalid_ami(app, monkeypatch):
+    monkeypatch.setattr("app.routes._client", lambda _name: (_ for _ in ()).throw(AssertionError("client should not be called")))
+    response = app.test_client().post("/api/services/ec2/instances", json={
+        "image_id": "not-an-ami",
+        "instance_type": "t2.micro",
+    })
+    assert response.status_code == 400
+    assert response.json["error"]["code"] == "ValidationError"
+
+
+def test_ec2_run_instances_rejects_invalid_instance_type(app, monkeypatch):
+    monkeypatch.setattr("app.routes._client", lambda _name: (_ for _ in ()).throw(AssertionError("client should not be called")))
+    response = app.test_client().post("/api/services/ec2/instances", json={
+        "image_id": "ami-0abcdef1234567890",
+        "instance_type": "invalid-type",
+    })
+    assert response.status_code == 400
+    assert response.json["error"]["code"] == "ValidationError"
+
+
+def test_ec2_run_instances_records_created_instances(app, monkeypatch):
+    class FakeEc2Client:
+        def run_instances(self, **kwargs):
+            assert kwargs["ImageId"] == "ami-0abcdef1234567890"
+            assert kwargs["InstanceType"] == "t2.micro"
+            return {"Instances": [{"InstanceId": "i-abc123"}, {"InstanceId": "i-def456"}]}
+        def create_tags(self, **kwargs):
+            assert kwargs["Resources"] == ["i-abc123", "i-def456"]
+
+    monkeypatch.setattr("app.routes._client", lambda _name: FakeEc2Client())
+    response = app.test_client().post("/api/services/ec2/instances", json={
+        "image_id": "ami-0abcdef1234567890",
+        "instance_type": "t2.micro",
+        "name": "demo",
+        "count": 2,
+    })
+    assert response.status_code == 201, response.json
+    assert response.json["resource"]["count"] == 2
+    assert "i-abc123" in app.extensions["console_created_instances"]
+    assert "i-def456" in app.extensions["console_created_instances"]
+
+
+def test_ec2_lifecycle_requires_instance_ids(app, monkeypatch):
+    monkeypatch.setattr("app.routes._client", lambda _name: (_ for _ in ()).throw(AssertionError("client should not be called")))
+    response = app.test_client().post("/api/services/ec2/instances/start", json={"instance_ids": []})
+    assert response.status_code == 400
+
+
+def test_ec2_terminate_requires_console_ownership(app, monkeypatch):
+    monkeypatch.setattr("app.routes._client", lambda _name: (_ for _ in ()).throw(AssertionError("terminate should not run")))
+    response = app.test_client().post("/api/services/ec2/instances/terminate", json={
+        "instance_ids": ["i-0abcdef1234567890"],
     })
     assert response.status_code == 403
+    assert response.json["error"]["code"] == "InstanceNotOwnedByConsole"
 
 
-def test_sqs_queue_delete_is_limited_to_console_created_queues(app, monkeypatch):
-    monkeypatch.setattr("app.routes.sqs.delete_queue", lambda *args: (_ for _ in ()).throw(AssertionError("delete should not run")))
-    response = app.test_client().post("/api/services/sqs/queues/delete", json={
-        "queue_url": "http://127.0.0.1:4566/000000000000/preexisting-queue",
+def test_ec2_terminate_owned_instance_discards_ownership(app, monkeypatch):
+    app.extensions["console_created_instances"].add("i-0abcdef1234567890")
+
+    class FakeEc2Client:
+        def terminate_instances(self, **kwargs):
+            assert kwargs["InstanceIds"] == ["i-0abcdef1234567890"]
+            return {"TerminatingInstances": [{"InstanceId": "i-0abcdef1234567890", "PreviousState": {"Name": "running"}, "CurrentState": {"Name": "shutting-down"}}]}
+
+    monkeypatch.setattr("app.routes._client", lambda _name: FakeEc2Client())
+    response = app.test_client().post("/api/services/ec2/instances/terminate", json={
+        "instance_ids": ["i-0abcdef1234567890"],
+    })
+    assert response.status_code == 200, response.json
+    assert "i-0abcdef1234567890" not in app.extensions["console_created_instances"]
+
+
+# ---------------------------------------------------------------------------
+# Lambda route safety
+# ---------------------------------------------------------------------------
+
+
+def test_lambda_create_function_rejects_invalid_runtime(app, monkeypatch):
+    monkeypatch.setattr("app.routes._client", lambda _name: (_ for _ in ()).throw(AssertionError("client should not be called")))
+    response = app.test_client().post("/api/services/lambda/functions", json={
+        "name": "demo-fn",
+        "runtime": "unsupported-runtime",
+        "handler": "index.handler",
+        "code": "def handler(event, context): return {}",
+    })
+    assert response.status_code == 400
+
+
+def test_lambda_create_function_rejects_invalid_handler(app, monkeypatch):
+    monkeypatch.setattr("app.routes._client", lambda _name: (_ for _ in ()).throw(AssertionError("client should not be called")))
+    response = app.test_client().post("/api/services/lambda/functions", json={
+        "name": "demo-fn",
+        "runtime": "python3.12",
+        "handler": "no_dot",
+        "code": "def handler(event, context): return {}",
+    })
+    assert response.status_code == 400
+
+
+def test_lambda_create_function_packages_code_and_records_ownership(app, monkeypatch):
+    class FakeLambdaClient:
+        def create_function(self, **kwargs):
+            assert kwargs["FunctionName"] == "demo-fn"
+            assert kwargs["Runtime"] == "python3.12"
+            assert kwargs["Handler"] == "index.handler"
+            assert "ZipFile" in kwargs["Code"]
+            return {
+                "FunctionName": "demo-fn",
+                "FunctionArn": "arn:aws:lambda:us-east-1:000000000000:function:demo-fn",
+                "Runtime": "python3.12",
+                "Handler": "index.handler",
+                "State": "Pending",
+            }
+
+    monkeypatch.setattr("app.routes._client", lambda _name: FakeLambdaClient())
+    response = app.test_client().post("/api/services/lambda/functions", json={
+        "name": "demo-fn",
+        "runtime": "python3.12",
+        "handler": "index.handler",
+        "code": "def handler(event, context): return {}",
+    })
+    assert response.status_code == 201, response.json
+    assert "demo-fn" in app.extensions["console_created_functions"]
+
+
+def test_lambda_delete_requires_ownership(app, monkeypatch):
+    monkeypatch.setattr("app.routes._client", lambda _name: (_ for _ in ()).throw(AssertionError("delete should not run")))
+    response = app.test_client().post("/api/services/lambda/functions/delete", json={
+        "name": "not-owned-fn",
         "confirmed": True,
-        "confirm_value": "preexisting-queue",
+        "confirm_value": "not-owned-fn",
     })
     assert response.status_code == 403
+    assert response.json["error"]["code"] == "FunctionNotOwnedByConsole"
 
 
-def test_sns_topic_delete_is_limited_to_console_created_topics(app, monkeypatch):
-    monkeypatch.setattr("app.routes.sns.delete_topic", lambda *args: (_ for _ in ()).throw(AssertionError("delete should not run")))
-    response = app.test_client().post("/api/services/sns/topics/delete", json={
-        "topic_arn": "arn:aws:sns:us-east-1:000000000000:preexisting-topic",
-        "confirmed": True,
-        "confirm_value": "preexisting-topic",
+def test_lambda_delete_requires_exact_confirmation(app, monkeypatch):
+    app.extensions["console_created_functions"].add("owned-fn")
+    monkeypatch.setattr("app.routes._client", lambda _name: (_ for _ in ()).throw(AssertionError("delete should not run")))
+    response = app.test_client().post("/api/services/lambda/functions/delete", json={
+        "name": "owned-fn",
     })
-    assert response.status_code == 403
+    assert response.status_code == 400
+    assert response.json["error"]["code"] == "ConfirmationRequired"
 
 
-def test_dynamodb_scan_is_limited_to_console_created_tables(app, monkeypatch):
-    monkeypatch.setattr("app.routes.dynamodb.scan_table", lambda *args: (_ for _ in ()).throw(AssertionError("scan should not run")))
-    response = app.test_client().get("/api/services/dynamodb/tables/existing-user-table/scan")
-    assert response.status_code == 403
+def test_lambda_invoke_decodes_json_payload(app, monkeypatch):
+    class FakeLambdaClient:
+        def invoke(self, **kwargs):
+            assert kwargs["FunctionName"] == "owned-fn"
+            assert kwargs["InvocationType"] == "RequestResponse"
+            from io import BytesIO
+            return {
+                "StatusCode": 200,
+                "ExecutedVersion": "$LATEST",
+                "Payload": BytesIO(b'{"statusCode": 200, "body": "ok"}'),
+            }
 
-
-def test_lambda_invoke_is_limited_to_console_created_functions(app, monkeypatch):
-    monkeypatch.setattr("app.routes.lambda_functions.invoke_function", lambda *args: (_ for _ in ()).throw(AssertionError("invoke should not run")))
-    response = app.test_client().post("/api/services/lambda/functions/ExistingFn/invoke", json={"payload": {}})
-    assert response.status_code == 403
-
-
-def test_ec2_start_is_limited_to_console_created_instances(app, monkeypatch):
-    monkeypatch.setattr("app.routes.ec2.start_instances", lambda *args: (_ for _ in ()).throw(AssertionError("start should not run")))
-    response = app.test_client().post("/api/services/ec2/instances/start", json={"instance_ids": ["i-0123456789abcdef0"]})
-    assert response.status_code == 403
+    monkeypatch.setattr("app.routes._client", lambda _name: FakeLambdaClient())
+    response = app.test_client().post("/api/services/lambda/functions/invoke", json={
+        "name": "owned-fn",
+        "payload": {"key": "value"},
+    })
+    assert response.status_code == 200, response.json
+    assert response.json["result"]["payload"] == {"statusCode": 200, "body": "ok"}

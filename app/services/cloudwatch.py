@@ -70,36 +70,3 @@ def get_log_events(client, group_name, stream_name, limit=100):
         "next_forward_token": response.get("nextForwardToken"),
         "next_backward_token": response.get("nextBackwardToken"),
     }
-
-
-def create_log_group(client, group_name, retention_days=None):
-    """Create a CloudWatch log group."""
-    client.create_log_group(logGroupName=group_name)
-    if retention_days:
-        client.put_retention_policy(logGroupName=group_name, retentionInDays=retention_days)
-    return {"name": group_name}
-
-
-def create_log_stream(client, group_name, stream_name):
-    """Create a log stream within a log group."""
-    client.create_log_stream(logGroupName=group_name, logStreamName=stream_name)
-    return {"name": stream_name}
-
-
-def put_log_events(client, group_name, stream_name, messages):
-    """Put log events into a log stream."""
-    import time
-    events = [
-        {"timestamp": int(time.time() * 1000), "message": msg}
-        for msg in messages
-    ]
-    return client.put_log_events(
-        logGroupName=group_name,
-        logStreamName=stream_name,
-        logEvents=events,
-    )
-
-
-def delete_log_group(client, group_name):
-    """Delete a CloudWatch log group."""
-    return client.delete_log_group(logGroupName=group_name)

@@ -152,6 +152,35 @@ def test_sns_dashboard_publish_only_to_unsubscribed_temporary_topic(app):
             assert topic_name not in names
 
 
+def test_sns_dashboard_subscribe_to_temporary_topic(app):
+    client = app.test_client()
+    sns = _client(app, "sns")
+    topic_name = f"lc-console-it-sns-sub-{_suffix()}"
+    topic_arn = None
+    try:
+        created = client.post("/api/services/sns/topics", json={"name": topic_name})
+        assert created.status_code == 201, created.json
+        topic_arn = created.json["resource"]["arn"]
+
+        subscribed = client.post("/api/services/sns/subscribe", json={
+            "topic_arn": topic_arn,
+            "protocol": "email",
+            "endpoint": "console-integration@example.invalid",
+        })
+        assert subscribed.status_code == 201, subscribed.json
+
+        listed = client.get("/api/services/sns/subscriptions", query_string={"topic_arn": topic_arn})
+        assert listed.status_code == 200
+        assert any(
+            item.get("Protocol") == "email"
+            and item.get("Endpoint") == "console-integration@example.invalid"
+            for item in listed.json["subscriptions"]
+        )
+    finally:
+        if topic_arn:
+            sns.delete_topic(TopicArn=topic_arn)
+
+
 def test_api_gateway_dashboard_create_inspect_and_confirmed_delete(app):
     client = app.test_client()
     api = _client(app, "apigateway")
@@ -175,6 +204,33 @@ def test_api_gateway_dashboard_create_inspect_and_confirmed_delete(app):
     finally:
         if api_id:
             api.delete_rest_api(restApiId=api_id)
+
+
+def test_api_gateway_dashboard_lists_http_apis_and_routes(app):
+    client = app.test_client()
+    api = _client(app, "apigatewayv2")
+    name = f"lc-console-it-http-{_suffix()}"
+    api_id = None
+    try:
+        created = client.post("/api/services/api_gateway/http", json={"name": name})
+        assert created.status_code == 201, created.json
+        api_id = created.json["resource"]["id"]
+
+        listed_apis = client.get("/api/services/api_gateway")
+        assert listed_apis.status_code == 200
+        assert any(
+            item["id"] == api_id
+            for item in listed_apis.json["data"]["http"]["apis"]
+        )
+
+        listed_routes = client.get(f"/api/services/api_gateway/http/{api_id}/routes")
+        assert listed_routes.status_code == 200, listed_routes.json
+        assert isinstance(listed_routes.json["routes"], list)
+    finally:
+        if api_id:
+            api.delete_api(ApiId=api_id)
+            remaining = api.get_apis(MaxResults="100").get("Items", [])
+            assert all(item.get("ApiId") != api_id for item in remaining)
 
 
 def test_cloudwatch_dashboard_reads_real_log_events_and_cleans_temporary_group(app):
@@ -206,3 +262,90 @@ def test_cloudwatch_dashboard_reads_real_log_events_and_cleans_temporary_group(a
             logs.delete_log_group(logGroupName=group)
             remaining = logs.describe_log_groups(logGroupNamePrefix=group, limit=50).get("logGroups", [])
             assert all(item.get("logGroupName") != group for item in remaining)
+
+
+def test_ec2_dashboard_launch_stop_start_and_terminate(app):
+    client = app.test_client()
+    ec2 = _client(app, "ec2")
+    instance_ids = []
+    try:
+        launched = client.post("/api/services/ec2/instances", json={
+            "image_id": "ami-0abcdef1234567890",
+            "instance_type": "t2.micro",
+            "name": f"lc-console-it-ec2-{_suffix()}",
+            "count": 1,
+        })
+        assert launched.status_code == 201, launched.json
+        instance_ids = launched.json["resource"]["instance_ids"]
+        assert len(instance_ids) == 1
+
+        listed = client.get("/api/services/ec2")
+        assert listed.status_code == 200
+        visible_ids = {inst["id"] for inst in listed.json["data"]["instances"]}
+        assert instance_ids[0] in visible_ids
+
+        stopped = client.post("/api/services/ec2/instances/stop", json={"instance_ids": instance_ids})
+        assert stopped.status_code == 200, stopped.json
+
+        started = client.post("/api/services/ec2/instances/start", json={"instance_ids": instance_ids})
+        assert started.status_code == 200, started.json
+    finally:
+        if instance_ids:
+            ec2.terminate_instances(InstanceIds=instance_ids)
+            remaining = {
+                inst["InstanceId"]
+                for page in ec2.get_paginator("describe_instances").paginate()
+                for reservation in page.get("Reservations", [])
+                for inst in reservation.get("Instances", [])
+            }
+            assert all(iid not in remaining for iid in instance_ids)
+
+
+def test_lambda_dashboard_create_invoke_and_confirmed_delete(app):
+    client = app.test_client()
+    lmbda = _client(app, "lambda")
+    name = f"lc-console-it-lambda-{_suffix()}"
+    created = False
+    try:
+        response = client.post("/api/services/lambda/functions", json={
+            "name": name,
+            "runtime": "python3.12",
+            "handler": "index.handler",
+            "code": "def handler(event, context):\n    return {'statusCode': 200, 'body': 'LocalCloud Lambda integration', 'event': event}",
+            "memory_size": 128,
+            "timeout": 3,
+        })
+        assert response.status_code == 201, response.json
+        created = True
+
+        listed = client.get("/api/services/lambda")
+        assert listed.status_code == 200
+        names = {fn["name"] for fn in listed.json["data"]["functions"]}
+        assert name in names
+
+        invoked = client.post("/api/services/lambda/functions/invoke", json={
+            "name": name,
+            "payload": {"ping": "pong"},
+        })
+        assert invoked.status_code == 200, invoked.json
+        assert invoked.json["result"]["status_code"] == 200
+
+        refused = client.post("/api/services/lambda/functions/delete", json={"name": name})
+        assert refused.status_code == 400
+
+        deleted = client.post("/api/services/lambda/functions/delete", json={
+            "name": name,
+            "confirmed": True,
+            "confirm_value": name,
+        })
+        assert deleted.status_code == 200
+        created = False
+    finally:
+        if created:
+            lmbda.delete_function(FunctionName=name)
+            remaining = {
+                fn["FunctionName"]
+                for page in lmbda.get_paginator("list_functions").paginate()
+                for fn in page.get("Functions", [])
+            }
+            assert name not in remaining

@@ -25,7 +25,7 @@ class ClientProvider:
         if service not in SERVICE_CLIENTS:
             raise KeyError(f"Unknown AWS-compatible service: {service}")
         if service not in self._clients:
-            timeout = 60 if service == "ec2" else 10
+            timeout = 60 if service in ("ec2", "lambda") else 10
             client_config = Config(
                 connect_timeout=3,
                 read_timeout=timeout,

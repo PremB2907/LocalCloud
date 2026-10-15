@@ -81,11 +81,11 @@ Validated dashboard operations against this Floci instance:
 - **S3:** list/create buckets; upload, list, inspect metadata, download, and confirmed delete of a selected object. Upload refuses to overwrite an existing key; file size is limited to 10 MiB.
 - **DynamoDB:** list/describe tables; create a PAY_PER_REQUEST table with String `pk`; insert/retrieve a String sample item in a table created by the current dashboard process. Existing items are not overwritten.
 - **SQS:** list queues and attributes; create a standard queue; send, receive, and explicitly delete one selected received message. Receipt handles stay server-side; queue deletion is not exposed.
-- **SNS:** list topics/subscriptions, create a topic, and publish only after confirming it has no subscriptions. Subscription creation is not exposed.
+- **SNS:** list topics/subscriptions, create a topic, subscribe an email endpoint, and publish only after confirming the topic has no subscriptions. Subscriber delivery is not validated.
 - **CloudWatch:** list metrics/log groups and inspect streams/events. A temporary log group/event was read through the dashboard and removed. Metric reads are not validated.
-- **API Gateway:** list REST and HTTP APIs; create a REST API, inspect its resources, and delete only an API created by the current dashboard process after exact-name confirmation. The test API was not deployed or invoked.
-- **Lambda:** list functions and provide a configuration-inspection path if a function exists. The function inventory was empty, so successful configuration inspection and invocation are unvalidated; no invocation control is present.
-- **EC2:** list instance records. Floci models instances as Docker containers, not public-cloud VPSs. The Docker socket is not mounted, so no instance creation or lifecycle action is exposed.
+- **API Gateway:** list REST and HTTP APIs and inspect HTTP API routes; create a REST API, inspect its resources, and delete only an API created by the current dashboard process after exact-name confirmation. APIs were not deployed or invoked.
+- **Lambda:** list functions, inspect configuration, create functions from inline source (packaged into a zip), invoke synchronously, and delete functions created in this dashboard session. Lambda execution runs Docker containers and requires the Floci Docker socket to be mounted (see `compose.yaml`).
+- **EC2:** list instances, launch Docker-backed instances from a Floci catalog AMI, start/stop any visible instance, and terminate instances created in this dashboard session. EC2 execution runs Docker containers and requires the Floci Docker socket to be mounted (see `compose.yaml`).
 
 Deletes require an explicit typed confirmation and are restricted to a selected object, received message, or dashboard-created REST API. Creates are collision-checked. Dashboard-created tables and APIs are marked as owned only in the running Flask process; after a dashboard restart they remain visible but become read-only through ownership-restricted actions. User-created resources persist in Floci's current in-memory mode until deleted through a separately validated API or Floci is restarted. The dashboard never deletes everything.
 
@@ -106,21 +106,11 @@ sudo docker compose logs --tail=100 -f floci
 
 ## Stop and Restart
 
-Stop the Flask dashboard with Ctrl+C in the terminal that is running `run.py`. That does not stop Floci.
-
-Stop the existing Floci container without deleting it:
+Stop and remove the container:
 
 ```bash
-sudo docker stop localcloud-floci-1
+sudo docker compose down
 ```
-
-Start the same container again:
-
-```bash
-sudo docker start localcloud-floci-1
-```
-
-`sudo docker compose down` stops and removes the container. Do not use it if you need to keep the current container identity. Floci's default storage is in-memory, so removing the container still loses emulator resources.
 
 Restart the existing container:
 
@@ -132,8 +122,8 @@ sudo docker compose restart floci
 
 - This account requires `sudo` to access Docker, including for logs and container inspection.
 - Floci's documented default storage mode is in-memory. This Compose setup has no persistence volume, so container removal loses emulator state.
-- The Docker socket is intentionally not mounted and only port 4566 is published. Floci features that launch their own Docker containers or require additional published ports are not enabled by this minimal local setup.
-- S3 virtual-hosted addressing, DynamoDB features beyond the tested String partition-key path, SQS FIFO behavior, SNS delivery to subscribers, CloudWatch metrics reads, API Gateway deployment/invocation, Lambda invocation, EC2 lifecycle operations, IAM enforcement, and other service operations remain unvalidated.
+- The Docker socket is now mounted in `compose.yaml` so EC2 (Docker-backed instances) and Lambda (container execution) can run. Without the socket, EC2 launch and Lambda invocation fail.
+- S3 virtual-hosted addressing, DynamoDB features beyond the tested String partition-key path, SQS FIFO behavior, SNS delivery to subscribers, CloudWatch metrics reads, API Gateway deployment/invocation, Lambda versions/aliases/layers, EC2 networking/security groups beyond the Floci defaults, IAM enforcement, and other service operations remain unvalidated.
 
 ## Persistence Proposal (Not Active)
 

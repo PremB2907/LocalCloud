@@ -22,7 +22,7 @@ Open `http://127.0.0.1:5000`. The dashboard binds to loopback. Verify Floci is r
 3. **DynamoDB:** Create a uniquely named on-demand table with String partition key `pk`; insert a sample item; retrieve it. Sample item writes are limited to tables created by the current dashboard process and duplicate keys are refused.
 4. **SQS:** Create a standard queue, send a short message, receive it, and delete only the selected message by typing its exact message ID. Raw receipt handles are never shown to the browser.
 5. **SNS:** Create a topic and publish a test message only while it has no subscriptions. The UI asks for `PUBLISH`; the backend rechecks subscriptions before publishing.
-6. **CloudWatch:** Show live metric/log-group empty states, or inspect existing log groups, streams, and events if present. You may create a session-owned log group. The dashboard does not generate metric data or charts.
+6. **CloudWatch:** Show live metric/log-group empty states, or inspect existing log groups, streams, and events if present. The dashboard does not generate metric data.
 7. **API Gateway:** Create a REST API, inspect its resources, then delete that session-owned API by typing its exact name. Creation does not deploy a stage or make a public endpoint.
 8. **Lambda / EC2:** Show actual function/instance inventories and the stated limitations. Do not claim invocation, guest OS boot, or a public VPS when those operations have not been tested.
 
@@ -30,9 +30,7 @@ Open `http://127.0.0.1:5000`. The dashboard binds to loopback. Verify Floci is r
 
 Dashboard operations create Floci resources until explicitly removed or the memory-backed Floci container is restarted. There is no delete-all action. Record the exact resource name, ARN, or URL shown by the app.
 
-The UI can delete session-owned empty S3 buckets, DynamoDB tables, SQS queues (and purge them), SNS topics, CloudWatch log groups, and REST APIs after typing the exact resource name. Selected S3 objects and received SQS messages can also be deleted with exact confirmation. Resources created outside this dashboard session remain visible but cannot be deleted through those restricted actions.
-
-After a dashboard restart, ownership markers are lost, so session-owned delete buttons disappear even though the Floci resources still exist. In that case, remove a specifically recorded resource with the matching SDK call: `s3.delete_bucket(Bucket="<exact-empty-demo-bucket>")`, `dynamodb.delete_table(TableName="<exact-demo-table>")`, `sqs.delete_queue(QueueUrl="<exact-demo-queue-url>")`, or `sns.delete_topic(TopicArn="<exact-demo-topic-arn>")`.
+The UI exposes only selected-object deletion, selected received-message deletion, and current-process REST API deletion, all with exact-resource confirmation. It deliberately does not expose bucket/table/queue/topic deletion. To remove a demo-created resource, call the corresponding SDK operation with the exact recorded identifier: `s3.delete_bucket(Bucket="<exact-empty-demo-bucket>")`, `dynamodb.delete_table(TableName="<exact-demo-table>")`, `sqs.delete_queue(QueueUrl="<exact-demo-queue-url>")`, or `sns.delete_topic(TopicArn="<exact-demo-topic-arn>")`.
 
 Do not replace those exact-resource calls with a broad list loop or delete-all operation. DynamoDB table/API ownership markers are process-local; after a dashboard restart those existing resources remain visible but ownership-restricted write/delete actions are unavailable in the app.
 

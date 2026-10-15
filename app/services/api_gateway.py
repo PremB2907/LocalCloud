@@ -53,6 +53,13 @@ def list_http_apis(client):
     }
 
 
+def create_http_api(client, name):
+    existing = client.get_paginator("get_apis").paginate(MaxResults="100")
+    if any(api.get("Name") == name for page in existing for api in page.get("Items", [])):
+        raise ValueError("An HTTP API with this name already exists; it was left unchanged.")
+    return client.create_api(Name=name, ProtocolType="HTTP")
+
+
 def list_http_routes(client, api_id):
     response = client.get_routes(ApiId=api_id, MaxResults="100")
     return [

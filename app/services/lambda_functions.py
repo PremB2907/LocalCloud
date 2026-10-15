@@ -3,9 +3,24 @@ import json
 import zipfile
 from io import BytesIO
 
-from botocore.exceptions import ClientError
-
 from app.services.common import isoformat
+
+
+# Runtimes commonly supported by Floci's Docker-based Lambda executor.
+SUPPORTED_RUNTIMES = (
+    "python3.12",
+    "python3.11",
+    "python3.10",
+    "nodejs22.x",
+    "nodejs20.x",
+    "nodejs18.x",
+    "java17",
+    "go1.x",
+    "ruby3.2",
+)
+
+# Default IAM role ARN accepted by the local emulator.
+DEFAULT_ROLE_ARN = "arn:aws:iam::000000000000:role/lambda-role"
 
 
 def list_functions(client):
@@ -44,88 +59,75 @@ def function_configuration(client, function_name):
     }
 
 
-def _build_lambda_zip(handler_code):
-    """Build in-memory ZIP containing lambda_function.py with the provided code."""
-    buf = BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("lambda_function.py", handler_code)
-    buf.seek(0)
-    return buf.read()
+def _build_zip(code, handler):
+    """Package function source into an in-memory zip.
+
+    The handler is expected in the form ``filename.function_name``; the source
+    is written to ``filename.py`` so the runtime can import it.
+    """
+    module_name = handler.split(".", 1)[0] if "." in handler else "index"
+    buffer = BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(f"{module_name}.py", code)
+    return buffer.getvalue()
 
 
-DEFAULT_HANDLER_CODE = '''import json
+def create_function(client, function_name, runtime, handler, code,
+                    role=DEFAULT_ROLE_ARN, description="", memory_size=128, timeout=3):
+    """Create a Lambda function from inline source code.
 
-def lambda_handler(event, context):
-    """Simple echo handler created by LocalCloud Console."""
-    return {
-        "statusCode": 200,
-        "body": json.dumps({
-            "message": "Hello from LocalCloud!",
-            "event": event,
-        }),
-    }
-'''
-
-
-def create_function(client, function_name, runtime="python3.12", handler="lambda_function.lambda_handler",
-                     memory_size=128, timeout=30, description="", handler_code=None):
-    """Create a Lambda function with a simple inline handler."""
-    try:
-        client.get_function(FunctionName=function_name)
-    except ClientError as error:
-        code = str(error.response.get("Error", {}).get("Code", ""))
-        if code not in {"ResourceNotFoundException", "ResourceNotFound", "404", "NotFound"}:
-            raise
-    else:
-        raise ValueError(f"A function named '{function_name}' already exists; it was left unchanged.")
-
-    code_bytes = _build_lambda_zip(handler_code or DEFAULT_HANDLER_CODE)
-
+    The source is packaged into a zip and uploaded via ``ZipFile``. The role
+    ARN defaults to a local-emulator placeholder.
+    """
+    if runtime not in SUPPORTED_RUNTIMES:
+        raise ValueError(f"Unsupported runtime: {runtime}. Choose one of {', '.join(SUPPORTED_RUNTIMES)}.")
+    if "." not in handler:
+        raise ValueError("Handler must be in the form filename.function_name.")
+    zip_bytes = _build_zip(code, handler)
     response = client.create_function(
         FunctionName=function_name,
         Runtime=runtime,
-        Role="arn:aws:iam::000000000000:role/lambda-role",
+        Role=role,
         Handler=handler,
-        Code={"ZipFile": code_bytes},
-        Description=description or f"Created by LocalCloud Console",
-        Timeout=timeout,
+        Code={"ZipFile": zip_bytes},
+        Description=description,
         MemorySize=memory_size,
-        Publish=True,
+        Timeout=timeout,
+        Publish=False,
     )
-    return response
+    return {
+        "name": response.get("FunctionName"),
+        "arn": response.get("FunctionArn"),
+        "runtime": response.get("Runtime"),
+        "handler": response.get("Handler"),
+        "state": response.get("State", "Pending"),
+        "last_modified": isoformat(response.get("LastModified")),
+    }
 
 
 def invoke_function(client, function_name, payload=None):
-    """Invoke a Lambda function and return the response."""
-    params = {
+    """Invoke a function synchronously and return its decoded payload."""
+    invoke_args = {
         "FunctionName": function_name,
         "InvocationType": "RequestResponse",
-        "LogType": "Tail",
+        "LogType": "None",
     }
     if payload is not None:
-        params["Payload"] = json.dumps(payload).encode("utf-8")
-    else:
-        params["Payload"] = b"{}"
-
-    response = client.invoke(**params)
-    result_payload = response.get("Payload")
-    body = result_payload.read().decode("utf-8") if result_payload else ""
-    log_result = response.get("LogResult", "")
-
+        invoke_args["Payload"] = json.dumps(payload).encode("utf-8")
+    response = client.invoke(**invoke_args)
+    body = response["Payload"].read()
+    response["Payload"].close()
     try:
-        decoded_log = base64.b64decode(log_result).decode("utf-8") if log_result else ""
-    except Exception:
-        decoded_log = log_result
-
+        decoded = json.loads(body.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        decoded = body.decode("utf-8", errors="replace")
     return {
         "status_code": response.get("StatusCode"),
-        "function_error": response.get("FunctionError"),
-        "log_output": decoded_log,
-        "payload": body,
         "executed_version": response.get("ExecutedVersion"),
+        "function_error": response.get("FunctionError"),
+        "payload": decoded,
     }
 
 
 def delete_function(client, function_name):
-    """Delete a Lambda function."""
     return client.delete_function(FunctionName=function_name)

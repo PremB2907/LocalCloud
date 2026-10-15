@@ -14,8 +14,6 @@ flowchart LR
 
 The console is a separate Python process. It does not join or modify the Floci Compose project and does not restart Floci. The dashboard process binds to `127.0.0.1`; Boto3 clients use the configured local endpoint explicitly.
 
-The frontend is a single-page vanilla JavaScript console. The command palette filters service navigation labels only. The Activity / Operations Log view reads `/api/operations` from Flask process memory.
-
 ## Project Structure
 
 ```text
@@ -54,7 +52,7 @@ Only HTTP loopback endpoints are accepted. Flask trusts loopback Host names only
 
 Each service page calls its own adapter. CloudWatch Logs and Metrics, and API Gateway v1 and v2, are queried independently so a failed subservice is shown as unavailable without hiding successful sibling data. Empty arrays are rendered as empty inventory, not as proof that an operation is unsupported.
 
-`catalog.py` links to the official Floci 2.2.0 service reference and labels tested operations separately from unvalidated operations. The UI lists Lambda functions and inspects configuration, and lists/inspects EC2 instance records. Lambda create/invoke/delete and EC2 lifecycle APIs exist on the Flask backend with session-ownership guards, but they are not shown in the UI because Floci's Docker-backed execution path has not been independently validated with this Compose file (the Docker socket is not mounted). Floci's documented EC2 instances are Docker-backed local containers rather than public VMs.
+`catalog.py` links to the official Floci 2.2.0 service reference and labels tested operations separately from unvalidated operations. The dashboard exposes no Lambda invoke or EC2 lifecycle operation. Floci's documented EC2 instances are Docker-backed local containers rather than public VMs; the active Compose file does not mount the Docker socket required for Lambda/EC2 execution.
 
 ## Resource Safety
 
@@ -63,7 +61,7 @@ Each service page calls its own adapter. CloudWatch Logs and Metrics, and API Ga
 - DynamoDB sample writes are limited to String-`pk` tables created by the current dashboard process and refuse to overwrite an existing key.
 - SNS publish is blocked when any topic subscription exists; it is checked again immediately before publish.
 - SQS accepts only queue URLs at the local Floci endpoint. Receipt handles remain server-side and are returned to the browser only through short-lived opaque delete tokens.
-- Destructive object, message, bucket, table, queue, topic, log-group, and REST API actions require a typed exact-value confirmation. Those deletions (except selected S3 objects and received SQS messages) are limited to resources created during the current dashboard process.
+- Destructive object, message, and REST API actions require a typed exact-value confirmation. REST API deletion is limited to APIs created during the current dashboard process.
 - The app has no delete-all route and does not automatically remove dashboard-created resources.
 
 Dashboard ownership markers and recent-operation history live in Flask process memory. After a Flask restart, existing DynamoDB tables and APIs remain visible but ownership-restricted sample writes/API deletion are unavailable through the app. Floci currently defaults to in-memory storage, so a Floci restart has separate state-loss implications.
