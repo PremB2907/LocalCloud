@@ -32,3 +32,17 @@ def publish_if_unsubscribed(client, topic_arn, message):
 def topic_attributes(client, topic_arn):
     response = client.get_topic_attributes(TopicArn=topic_arn)
     return response.get("Attributes", {})
+
+
+def delete_topic(client, topic_arn):
+    """Delete an SNS topic."""
+    return client.delete_topic(TopicArn=topic_arn)
+
+
+def list_subscriptions_by_topic(client, topic_arn):
+    """List all subscriptions for a topic."""
+    pages = client.get_paginator("list_subscriptions_by_topic").paginate(TopicArn=topic_arn)
+    subs = []
+    for page in pages:
+        subs.extend(page.get("Subscriptions", []))
+    return subs

@@ -106,11 +106,21 @@ sudo docker compose logs --tail=100 -f floci
 
 ## Stop and Restart
 
-Stop and remove the container:
+Stop the Flask dashboard with Ctrl+C in the terminal that is running `run.py`. That does not stop Floci.
+
+Stop the existing Floci container without deleting it:
 
 ```bash
-sudo docker compose down
+sudo docker stop localcloud-floci-1
 ```
+
+Start the same container again:
+
+```bash
+sudo docker start localcloud-floci-1
+```
+
+`sudo docker compose down` stops and removes the container. Do not use it if you need to keep the current container identity. Floci's default storage is in-memory, so removing the container still loses emulator resources.
 
 Restart the existing container:
 

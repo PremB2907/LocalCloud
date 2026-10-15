@@ -43,3 +43,13 @@ def queue_attributes(client, queue_url):
         AttributeNames=["All"],
     )
     return response.get("Attributes", {})
+
+
+def purge_queue(client, queue_url):
+    """Remove all messages from a queue."""
+    return client.purge_queue(QueueUrl=queue_url)
+
+
+def delete_queue(client, queue_url):
+    """Delete a queue."""
+    return client.delete_queue(QueueUrl=queue_url)

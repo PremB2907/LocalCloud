@@ -17,6 +17,7 @@ const serviceTitles = {
   ec2:         "EC2 Instances",
   cloudwatch:  "CloudWatch",
   api_gateway: "API Gateway",
+  operations:  "Operations Log",
 };
 const serviceBreadcrumbs = {
   overview:    ["Overview"],
@@ -28,6 +29,7 @@ const serviceBreadcrumbs = {
   ec2:         ["Compute", "EC2"],
   cloudwatch:  ["Observability", "CloudWatch"],
   api_gateway: ["App Integration", "API Gateway"],
+  operations:  ["Activity", "Operations Log"],
 };
 const serviceIcons = {
   overview:    "icon-overview",
@@ -39,11 +41,13 @@ const serviceIcons = {
   ec2:         "icon-ec2",
   cloudwatch:  "icon-cloudwatch",
   api_gateway: "icon-api_gateway",
+  operations:  "icon-ops",
 };
 
 /* ---- State ---- */
 let currentView = "overview";
 let catalog = {};
+let lastRefreshAt = null;
 const receiptHandles = new Map();
 
 /* ---- DOM refs ---- */
@@ -109,6 +113,17 @@ function el(tag, attrs = {}, ...children) {
 }
 
 /** Build an SVG <use> icon */
+function formatTimestamp(value) {
+  if (value == null || value === "") return "-";
+  const numeric = Number(value);
+  if (Number.isFinite(numeric) && numeric > 0) {
+    const millis = numeric > 1e12 ? numeric : numeric * 1000;
+    const date = new Date(millis);
+    if (!Number.isNaN(date.getTime())) return date.toISOString();
+  }
+  return String(value);
+}
+
 function svgIcon(id, cls = "") {
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   if (cls) svg.setAttribute("class", cls);
@@ -388,7 +403,7 @@ async function renderOverview() {
       )
     ),
     el("div", { class: "health-banner-meta" },
-      `http://127.0.0.1:4566${connected && health.version ? ` · v${health.version}` : ""}`
+      `http://127.0.0.1:4566${connected && health.version ? ` · v${health.version}` : ""}${lastRefreshAt ? ` · refreshed ${lastRefreshAt}` : ""}`
     )
   );
   pageContent.appendChild(banner);
@@ -458,41 +473,7 @@ async function renderOverview() {
   );
   pageContent.appendChild(opsSection);
 
-  let opsPanel;
-  if (!ops.length) {
-    opsPanel = buildPanel("Operations Log", "Session activity only",
-      el("div", { class: "empty-state" },
-        svgIcon("icon-ops"),
-        el("strong", {}, "No operations yet"),
-        el("span", {}, "Dashboard activity will appear here after performing an operation.")
-      )
-    );
-  } else {
-    const resultKind = (r) => r === "Succeeded" ? "success" : r === "Blocked" ? "blocked" : "error";
-    opsPanel = buildPanel("Operations Log", `${ops.length} session event${ops.length !== 1 ? "s" : ""}`,
-      el("div", { class: "table-scroll" },
-        el("table", {},
-          el("thead", {},
-            el("tr", {},
-              el("th", {}, "Operation"),
-              el("th", {}, "Resource"),
-              el("th", {}, "Result"),
-              el("th", {}, "Time")
-            )
-          ),
-          el("tbody", {},
-            ...ops.map((item) => el("tr", {},
-              el("td", {}, item.operation),
-              el("td", { class: "mono" }, item.resource),
-              el("td", {}, badgeEl(item.result, resultKind(item.result))),
-              el("td", {}, item.time)
-            ))
-          )
-        )
-      )
-    );
-  }
-  pageContent.appendChild(opsPanel);
+  pageContent.appendChild(renderOperationsTable(ops));
 }
 
 /* =============================================================
@@ -529,8 +510,9 @@ function serviceControls(key, data) {
   if (key === "s3") {
     const opts = selectOptions(data.buckets, "name", "name");
     const bucketRows = data.buckets.map((b) =>
-      `<div class="action-list-row"><span><strong>${escapeHtml(b.name)}</strong></span>` +
-      `<div class="action-list-buttons"><button class="secondary-button" data-action="list-objects" data-bucket="${escapeHtml(b.name)}">List objects</button></div></div>`
+      `<div class="action-list-row"><span><strong>${escapeHtml(b.name)}</strong>${b.console_owned ? ` <span class="badge badge-info" style="margin-left:6px">Session</span>` : ""}</span>` +
+      `<div class="action-list-buttons"><button class="secondary-button" data-action="list-objects" data-bucket="${escapeHtml(b.name)}">List objects</button>` +
+      `${b.console_owned ? `<button class="danger-button" data-action="delete-bucket" data-bucket="${escapeHtml(b.name)}">Delete bucket</button>` : ""}</div></div>`
     ).join("");
     return `
       ${panel("Create Bucket", "Live Floci operation",
@@ -557,7 +539,8 @@ function serviceControls(key, data) {
     const opts  = selectOptions(owned, "name", "name");
     const tableRows = data.tables.map((t) =>
       `<div class="action-list-row"><span><strong>${escapeHtml(t.name)}</strong>${t.console_owned ? ` <span class="badge badge-info" style="margin-left:6px">Session</span>` : ""}</span>` +
-      `<button class="secondary-button" data-action="inspect-table" data-table="${escapeHtml(t.name)}">Inspect</button></div>`
+      `<div class="action-list-buttons"><button class="secondary-button" data-action="inspect-table" data-table="${escapeHtml(t.name)}">Inspect</button>` +
+      `${t.console_owned ? `<button class="secondary-button" data-action="scan-table" data-table="${escapeHtml(t.name)}">Scan</button><button class="danger-button" data-action="delete-table" data-table="${escapeHtml(t.name)}">Delete</button>` : ""}</div></div>`
     ).join("");
     return `
       ${panel("Create Table", "PAY_PER_REQUEST · String pk",
@@ -590,8 +573,9 @@ function serviceControls(key, data) {
   if (key === "sqs") {
     const opts = selectOptions(data.queues, "url", "name");
     const queueRows = data.queues.map((q) =>
-      `<div class="action-list-row"><span><strong>${escapeHtml(q.name)}</strong><small class="mono">${escapeHtml(q.url)}</small></span>` +
-      `<button class="secondary-button" data-action="queue-attributes" data-queue="${escapeHtml(q.url)}">Attributes</button></div>`
+      `<div class="action-list-row"><span><strong>${escapeHtml(q.name)}</strong>${q.console_owned ? ` <span class="badge badge-info" style="margin-left:6px">Session</span>` : ""}<small class="mono">${escapeHtml(q.url)}</small></span>` +
+      `<div class="action-list-buttons"><button class="secondary-button" data-action="queue-attributes" data-queue="${escapeHtml(q.url)}">Attributes</button>` +
+      `${q.console_owned ? `<button class="danger-button" data-action="purge-queue" data-queue="${escapeHtml(q.url)}" data-name="${escapeHtml(q.name)}">Purge</button><button class="danger-button" data-action="delete-queue" data-queue="${escapeHtml(q.url)}" data-name="${escapeHtml(q.name)}">Delete</button>` : ""}</div></div>`
     ).join("");
     return `
       ${panel("Create Standard Queue", "Live Floci operation",
@@ -621,8 +605,9 @@ function serviceControls(key, data) {
   if (key === "sns") {
     const opts = selectOptions(data.topics, "arn", "name");
     const topicRows = data.topics.map((t) =>
-      `<div class="action-list-row"><span class="mono">${escapeHtml(t.name)}</span>` +
-      `<button class="secondary-button" data-action="inspect-topic" data-topic="${escapeHtml(t.arn)}">Subscriptions</button></div>`
+      `<div class="action-list-row"><span class="mono">${escapeHtml(t.name)}</span>${t.console_owned ? ` <span class="badge badge-info" style="margin-left:6px">Session</span>` : ""}` +
+      `<div class="action-list-buttons"><button class="secondary-button" data-action="inspect-topic" data-topic="${escapeHtml(t.arn)}">Subscriptions</button>` +
+      `${t.console_owned ? `<button class="danger-button" data-action="delete-topic" data-topic="${escapeHtml(t.arn)}" data-name="${escapeHtml(t.name)}">Delete</button>` : ""}</div></div>`
     ).join("");
     return `
       ${panel("Create Topic", "Live Floci operation",
@@ -670,13 +655,19 @@ function serviceControls(key, data) {
   if (key === "cloudwatch") {
     const groups = data.log_groups.ok ? data.log_groups.log_groups : [];
     const logRows = groups.map((g) =>
-      `<div class="action-list-row"><span class="mono">${escapeHtml(g.name)}</span>` +
-      `<button class="secondary-button" data-action="inspect-log-group" data-group="${escapeHtml(g.name)}">List streams</button></div>`
+      `<div class="action-list-row"><span class="mono">${escapeHtml(g.name)}</span>${g.console_owned ? ` <span class="badge badge-info" style="margin-left:6px">Session</span>` : ""}` +
+      `<div class="action-list-buttons"><button class="secondary-button" data-action="inspect-log-group" data-group="${escapeHtml(g.name)}">List streams</button>` +
+      `${g.console_owned ? `<button class="danger-button" data-action="delete-log-group" data-group="${escapeHtml(g.name)}">Delete</button>` : ""}</div></div>`
     ).join("");
     const metricsErr = data.metrics.ok ? "" : `<div class="error-band">CloudWatch Metrics request failed: ${escapeHtml(data.metrics.error.message)}</div>`;
     const logsErr    = data.log_groups.ok ? "" : `<div class="error-band">CloudWatch Logs request failed: ${escapeHtml(data.log_groups.error.message)}</div>`;
-    return `${metricsErr}${logsErr}${groups.length
-      ? `<section class="panel"><div class="panel-heading"><h3>Log Group Explorer</h3><span class="panel-meta">Read-only event inspection</span></div><div class="action-list">${logRows}</div></section>`
+    return `${metricsErr}${logsErr}${panel("Create Log Group", "Session-owned · no synthetic metrics",
+      `<form class="action-form" data-action="create-log-group">
+        <label>Log group name<input name="name" required maxlength="512" placeholder="/localcloud/demo" autocomplete="off"></label>
+        <button class="primary-button" type="submit">Create log group</button>
+      </form>`
+    )}${groups.length
+      ? `<section class="panel"><div class="panel-heading"><h3>Log Group Explorer</h3><span class="panel-meta">Inspect streams and events. Writes stay on session-owned groups.</span></div><div class="action-list">${logRows}</div></section>`
       : ""}`;
   }
 
@@ -685,9 +676,23 @@ function serviceControls(key, data) {
       `<div class="action-list-row"><span><strong>${escapeHtml(fn.name)}</strong><small class="mono">${escapeHtml(fn.arn)}</small></span>` +
       `<button class="secondary-button" data-action="inspect-function" data-function="${escapeHtml(fn.name)}">Configuration</button></div>`
     ).join("");
-    return fns
+    return `${panel("Function inventory", "Invocation is not exposed in this console",
+      `<div class="form-note">Floci Lambda execution uses Docker and requires a socket that this Compose setup does not mount. The dashboard lists functions and inspects configuration when a function exists. Create/invoke controls are omitted until that path is independently validated.</div>`
+    )}${fns
       ? `<section class="panel"><div class="panel-heading"><h3>Function Configuration</h3><span class="panel-meta">GetFunctionConfiguration — read only</span></div><div class="action-list">${fns}</div></section>`
-      : "";
+      : ""}`;
+  }
+
+  if (key === "ec2") {
+    const rows = data.instances.map((inst) =>
+      `<div class="action-list-row"><span><strong>${escapeHtml(inst.id)}</strong><small>${escapeHtml(inst.state || "unknown")} · ${escapeHtml(inst.instance_type || "-")}</small></span>` +
+      `<button class="secondary-button" data-action="inspect-instance" data-instance="${escapeHtml(inst.id)}">Inspect</button></div>`
+    ).join("");
+    return `${panel("Local container records", "Not a public VPS provider",
+      `<div class="form-note">Floci models EC2 as local Docker containers. This console lists and inspects emulator records only. Lifecycle actions (run, start, stop, terminate) are not shown because they have not been validated with the current Compose file, which does not mount the Docker socket.</div>`
+    )}${rows
+      ? `<section class="panel"><div class="panel-heading"><h3>Instance Details</h3><span class="panel-meta">DescribeInstances</span></div><div class="action-list">${rows}</div></section>`
+      : ""}`;
   }
 
   return "";
@@ -754,6 +759,58 @@ function renderService(key, response) {
   // Detail pane anchor
   const detailPane = el("div", { id: "detail-pane" });
   pageContent.appendChild(detailPane);
+}
+
+function renderOperationsTable(ops) {
+  if (!ops.length) {
+    return buildPanel("Operations Log", "Session activity only",
+      el("div", { class: "empty-state" },
+        svgIcon("icon-ops"),
+        el("strong", {}, "No operations yet"),
+        el("span", {}, "Dashboard activity will appear here after performing an operation.")
+      )
+    );
+  }
+  const resultKind = (r) => r === "Succeeded" ? "success" : r === "Blocked" ? "blocked" : "error";
+  return buildPanel("Operations Log", `${ops.length} session event${ops.length !== 1 ? "s" : ""}`,
+    el("div", { class: "table-scroll" },
+      el("table", {},
+        el("thead", {},
+          el("tr", {},
+            el("th", {}, "Operation"),
+            el("th", {}, "Resource"),
+            el("th", {}, "Result"),
+            el("th", {}, "Time")
+          )
+        ),
+        el("tbody", {},
+          ...ops.map((item) => el("tr", {},
+            el("td", {}, item.operation),
+            el("td", { class: "mono" }, item.resource),
+            el("td", {}, badgeEl(item.result, resultKind(item.result))),
+            el("td", {}, item.time)
+          ))
+        )
+      )
+    )
+  );
+}
+
+async function renderOperations() {
+  pageContent.innerHTML = "";
+  const intro = el("div", { class: "page-intro" },
+    el("div", {},
+      el("h2", {}, "Operations Log"),
+      el("p", {}, "Session-local audit trail of dashboard mutations. Entries are kept in Flask process memory and reset when the dashboard restarts. Secrets, credentials, SQS receipt handles, and invoke payloads are not stored here.")
+    )
+  );
+  pageContent.appendChild(intro);
+  try {
+    const ops = await requestJson("/api/operations");
+    pageContent.appendChild(renderOperationsTable(ops));
+  } catch (error) {
+    pageContent.appendChild(el("div", { class: "error-band" }, `${error.code || "Error"}: ${error.message}`));
+  }
 }
 
 async function renderServicePage(key) {
@@ -964,6 +1021,8 @@ async function handleFormSubmit(event) {
       result = await postJson("/api/services/sns/publish", values);
     } else if (action === "create-rest-api") {
       result = await postJson("/api/services/api_gateway/rest", values);
+    } else if (action === "create-log-group") {
+      result = await postJson("/api/services/cloudwatch/log-groups", values);
     } else {
       if (submitBtn && !wasDisabled) submitBtn.disabled = false;
       return;
@@ -988,6 +1047,7 @@ function actionLabel(action) {
     "create-topic":   "CreateTopic",
     "publish-message":"Publish",
     "create-rest-api":"CreateRestApi",
+    "create-log-group":"CreateLogGroup",
   })[action] || "Operation";
 }
 
@@ -1019,13 +1079,42 @@ async function handleActionClick(event) {
       toast("DeleteObject succeeded.");
       await navigate("s3");
 
+    } else if (action === "delete-bucket") {
+      const name = button.dataset.bucket;
+      if (!await confirmExact("Delete empty S3 bucket", "The bucket must be empty. Only session-created buckets can be deleted.", name, "Delete bucket")) return;
+      await postJson("/api/services/s3/buckets/delete", { name, confirmed: true, confirm_value: name });
+      toast("DeleteBucket succeeded.");
+      await navigate("s3");
+
     } else if (action === "inspect-table") {
       const r = await requestJson(`/api/services/dynamodb/tables/${encodeURIComponent(button.dataset.table)}`);
       showDetail("Table Metadata", [r.table], Object.keys(r.table).map((n) => [n, n]));
 
+    } else if (action === "scan-table") {
+      const r = await requestJson(`/api/services/dynamodb/tables/${encodeURIComponent(button.dataset.table)}/scan`);
+      const rows = (r.items || []).map((item, i) => ({
+        ...item,
+        typed_attributes: JSON.stringify(r.typed_items?.[i] || {}),
+      }));
+      const columns = rows.length
+        ? [...Object.keys(rows[0]).filter((k) => k !== "typed_attributes").map((k) => [k, k]), ["typed_attributes", "Typed attributes", true]]
+        : [["pk", "pk"], ["value", "value"]];
+      showDetail(`Scan ${button.dataset.table} (${r.count || 0} item${(r.count || 0) !== 1 ? "s" : ""}${r.has_more ? ", truncated" : ""})`, rows, columns);
+
+    } else if (action === "delete-table") {
+      const name = button.dataset.table;
+      if (!await confirmExact("Delete DynamoDB table", "Removes only a table created in this session.", name, "Delete table")) return;
+      await postJson("/api/services/dynamodb/tables/delete", { name, confirmed: true, confirm_value: name });
+      toast("DeleteTable succeeded.");
+      await navigate("dynamodb");
+
     } else if (action === "inspect-function") {
       const r = await requestJson(`/api/services/lambda/functions/${encodeURIComponent(button.dataset.function)}`);
       showDetail("Lambda Configuration", [r.function], Object.keys(r.function).map((n) => [n, n]));
+
+    } else if (action === "inspect-instance") {
+      const r = await requestJson(`/api/services/ec2/instances/${encodeURIComponent(button.dataset.instance)}`);
+      showDetail("Instance Details", [r.instance], Object.keys(r.instance).map((n) => [n, n]));
 
     } else if (action === "queue-attributes") {
       const r = await requestJson(`/api/services/sqs/attributes?queue_url=${encodeURIComponent(button.dataset.queue)}`);
@@ -1050,10 +1139,31 @@ async function handleActionClick(event) {
         ));
       }
 
+    } else if (action === "purge-queue") {
+      const name = button.dataset.name;
+      if (!await confirmExact("Purge SQS queue", "Removes all messages from this session-created queue. It does not delete the queue.", name, "Purge queue")) return;
+      await postJson("/api/services/sqs/queues/purge", { queue_url: button.dataset.queue, confirmed: true, confirm_value: name });
+      toast("PurgeQueue succeeded.");
+      await navigate("sqs");
+
+    } else if (action === "delete-queue") {
+      const name = button.dataset.name;
+      if (!await confirmExact("Delete SQS queue", "Removes only a queue created in this session.", name, "Delete queue")) return;
+      await postJson("/api/services/sqs/queues/delete", { queue_url: button.dataset.queue, confirmed: true, confirm_value: name });
+      toast("DeleteQueue succeeded.");
+      await navigate("sqs");
+
     } else if (action === "inspect-topic") {
       const r = await requestJson(`/api/services/sns/subscriptions?topic_arn=${encodeURIComponent(button.dataset.topic)}`);
       const rows = r.subscriptions.map((s) => ({ protocol: s.Protocol, endpoint: s.Endpoint, status: s.SubscriptionArn }));
       showDetail("Topic Subscriptions", rows, [["protocol","Protocol"],["endpoint","Endpoint"],["status","Subscription ARN"]]);
+
+    } else if (action === "delete-topic") {
+      const name = button.dataset.name;
+      if (!await confirmExact("Delete SNS topic", "Removes only a topic created in this session. No subscriber delivery is implied.", name, "Delete topic")) return;
+      await postJson("/api/services/sns/topics/delete", { topic_arn: button.dataset.topic, confirmed: true, confirm_value: name });
+      toast("DeleteTopic succeeded.");
+      await navigate("sns");
 
     } else if (action === "inspect-rest-api") {
       const r = await requestJson(`/api/services/api_gateway/rest/${encodeURIComponent(button.dataset.apiId)}/resources`);
@@ -1086,7 +1196,18 @@ async function handleActionClick(event) {
     } else if (action === "read-log-stream") {
       const query = new URLSearchParams({ group: button.dataset.group, stream: button.dataset.stream });
       const r = await requestJson(`/api/services/cloudwatch/events?${query}`);
-      showDetail("Log Events", r.events, [["timestamp","Timestamp"],["message","Message"]]);
+      const events = (r.events || []).map((event) => ({
+        timestamp: formatTimestamp(event.timestamp),
+        message: event.message,
+      }));
+      showDetail("Log Events", events, [["timestamp","Timestamp"],["message","Message"]]);
+
+    } else if (action === "delete-log-group") {
+      const name = button.dataset.group;
+      if (!await confirmExact("Delete log group", "Removes only a log group created in this session.", name, "Delete log group")) return;
+      await postJson("/api/services/cloudwatch/log-groups/delete", { name, confirmed: true, confirm_value: name });
+      toast("DeleteLogGroup succeeded.");
+      await navigate("cloudwatch");
     }
 
   } catch (error) {
@@ -1122,8 +1243,9 @@ async function navigate(view) {
   // Close mobile sidebar
   closeSidebar();
 
-  // Render
+  lastRefreshAt = new Date().toISOString();
   if (view === "overview") await renderOverview();
+  else if (view === "operations") await renderOperations();
   else await renderServicePage(view);
 
   // Focus main for accessibility
@@ -1172,6 +1294,7 @@ const paletteItems = [
   { label: "SNS Topics", icon: "icon-sns", view: "sns" },
   { label: "API Gateway", icon: "icon-api_gateway", view: "api_gateway" },
   { label: "CloudWatch", icon: "icon-cloudwatch", view: "cloudwatch" },
+  { label: "Operations Log", icon: "icon-ops", view: "operations" },
 ];
 
 let _palActiveIdx = -1;

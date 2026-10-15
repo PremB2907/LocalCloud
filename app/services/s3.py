@@ -77,3 +77,11 @@ def object_metadata(client, bucket_name, key):
         "metadata": response.get("Metadata", {}),
         "storage_class": response.get("StorageClass", "STANDARD"),
     }
+
+
+def delete_bucket(client, bucket_name):
+    """Delete an empty bucket. Raises ValueError if the bucket has objects."""
+    objects = client.list_objects_v2(Bucket=bucket_name, MaxKeys=1)
+    if objects.get("Contents"):
+        raise ValueError("Bucket is not empty. Remove all objects before deleting.")
+    return client.delete_bucket(Bucket=bucket_name)

@@ -153,3 +153,51 @@ def test_sns_blocked_publish_is_recorded_in_operations_log(app, monkeypatch):
     ops = app.extensions["recent_operations"]
     assert ops, "operation log must not be empty after a blocked publish"
     assert ops[0]["result"] == "Blocked"
+
+
+def test_s3_bucket_delete_is_limited_to_console_created_buckets(app, monkeypatch):
+    monkeypatch.setattr("app.routes.s3.delete_bucket", lambda *args: (_ for _ in ()).throw(AssertionError("delete should not run")))
+    response = app.test_client().post("/api/services/s3/buckets/delete", json={
+        "name": "preexisting-bucket",
+        "confirmed": True,
+        "confirm_value": "preexisting-bucket",
+    })
+    assert response.status_code == 403
+
+
+def test_sqs_queue_delete_is_limited_to_console_created_queues(app, monkeypatch):
+    monkeypatch.setattr("app.routes.sqs.delete_queue", lambda *args: (_ for _ in ()).throw(AssertionError("delete should not run")))
+    response = app.test_client().post("/api/services/sqs/queues/delete", json={
+        "queue_url": "http://127.0.0.1:4566/000000000000/preexisting-queue",
+        "confirmed": True,
+        "confirm_value": "preexisting-queue",
+    })
+    assert response.status_code == 403
+
+
+def test_sns_topic_delete_is_limited_to_console_created_topics(app, monkeypatch):
+    monkeypatch.setattr("app.routes.sns.delete_topic", lambda *args: (_ for _ in ()).throw(AssertionError("delete should not run")))
+    response = app.test_client().post("/api/services/sns/topics/delete", json={
+        "topic_arn": "arn:aws:sns:us-east-1:000000000000:preexisting-topic",
+        "confirmed": True,
+        "confirm_value": "preexisting-topic",
+    })
+    assert response.status_code == 403
+
+
+def test_dynamodb_scan_is_limited_to_console_created_tables(app, monkeypatch):
+    monkeypatch.setattr("app.routes.dynamodb.scan_table", lambda *args: (_ for _ in ()).throw(AssertionError("scan should not run")))
+    response = app.test_client().get("/api/services/dynamodb/tables/existing-user-table/scan")
+    assert response.status_code == 403
+
+
+def test_lambda_invoke_is_limited_to_console_created_functions(app, monkeypatch):
+    monkeypatch.setattr("app.routes.lambda_functions.invoke_function", lambda *args: (_ for _ in ()).throw(AssertionError("invoke should not run")))
+    response = app.test_client().post("/api/services/lambda/functions/ExistingFn/invoke", json={"payload": {}})
+    assert response.status_code == 403
+
+
+def test_ec2_start_is_limited_to_console_created_instances(app, monkeypatch):
+    monkeypatch.setattr("app.routes.ec2.start_instances", lambda *args: (_ for _ in ()).throw(AssertionError("start should not run")))
+    response = app.test_client().post("/api/services/ec2/instances/start", json={"instance_ids": ["i-0123456789abcdef0"]})
+    assert response.status_code == 403

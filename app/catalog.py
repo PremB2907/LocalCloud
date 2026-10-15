@@ -11,8 +11,10 @@ SERVICE_CATALOG = {
             {"name": "GetObject", "validation": "passed"},
             {"name": "ListObjectsV2", "validation": "passed"},
             {"name": "HeadObject", "validation": "passed"},
+            {"name": "DeleteObject", "validation": "passed"},
+            {"name": "DeleteBucket (session-owned, empty)", "validation": "not validated"},
         ],
-        "limitations": ["Only path-style addressing has been exercised."],
+        "limitations": ["Only path-style addressing has been exercised. Bucket deletion is limited to empty buckets created in the current dashboard session."],
     },
     "dynamodb": {
         "name": "Amazon DynamoDB",
@@ -25,8 +27,9 @@ SERVICE_CATALOG = {
             {"name": "CreateTable", "validation": "passed"},
             {"name": "PutItem", "validation": "passed"},
             {"name": "GetItem", "validation": "passed"},
+            {"name": "Scan / DeleteTable (session-owned)", "validation": "not validated"},
         ],
-        "limitations": ["Validation covered one String partition key and a simple item only."],
+        "limitations": ["Validation covered one String partition key and a simple item only. Sample writes, scans, and table deletion are limited to tables created in the current dashboard session."],
     },
     "sqs": {
         "name": "Amazon SQS",
@@ -40,8 +43,9 @@ SERVICE_CATALOG = {
             {"name": "ReceiveMessage", "validation": "passed"},
             {"name": "DeleteMessage", "validation": "passed"},
             {"name": "GetQueueAttributes", "validation": "passed"},
+            {"name": "PurgeQueue / DeleteQueue (session-owned)", "validation": "not validated"},
         ],
-        "limitations": ["Only a standard queue and a short-poll round trip were exercised."],
+        "limitations": ["Only a standard queue and a short-poll round trip were exercised. Queue purge/delete are limited to queues created in the current dashboard session."],
     },
     "sns": {
         "name": "Amazon SNS",
@@ -54,8 +58,9 @@ SERVICE_CATALOG = {
             {"name": "Publish (no subscribers)", "validation": "passed"},
             {"name": "ListSubscriptionsByTopic", "validation": "passed"},
             {"name": "Subscribe", "validation": "not validated"},
+            {"name": "DeleteTopic (session-owned)", "validation": "not validated"},
         ],
-        "limitations": ["Publishing is disabled for any topic with subscriptions; subscription creation is not exposed."],
+        "limitations": ["Publishing is disabled for any topic with subscriptions; subscription creation is not exposed. Topic deletion is limited to topics created in the current dashboard session."],
     },
     "lambda": {
         "name": "AWS Lambda",
@@ -65,11 +70,11 @@ SERVICE_CATALOG = {
         "operations": [
             {"name": "ListFunctions", "validation": "passed"},
             {"name": "GetFunctionConfiguration", "validation": "not validated"},
-            {"name": "Invoke", "validation": "not validated"},
+            {"name": "CreateFunction / Invoke / DeleteFunction", "validation": "not validated"},
         ],
         "limitations": [
             "Lambda execution uses real Docker containers and requires the Floci Docker socket, which the active Compose file does not mount.",
-            "The function list was empty; invocation was not attempted.",
+            "The console lists functions and inspects configuration. Create, invoke, and delete controls are not shown in the UI because invocation has not been independently validated.",
         ],
     },
     "ec2": {
@@ -79,12 +84,11 @@ SERVICE_CATALOG = {
         "description": "Instance records backed by local Docker containers, not public-cloud VPSs.",
         "operations": [
             {"name": "DescribeInstances", "validation": "passed"},
-            {"name": "RunInstances", "validation": "not validated"},
-            {"name": "StartInstances / StopInstances", "validation": "not validated"},
+            {"name": "RunInstances / StartInstances / StopInstances / TerminateInstances", "validation": "not validated"},
         ],
         "limitations": [
             "Floci's documented EC2 execution model launches Docker containers, not full public cloud VMs.",
-            "The Docker socket is not mounted, and no lifecycle operation was attempted.",
+            "The Docker socket is not mounted. The console lists and inspects instance records only; lifecycle actions are not shown in the UI.",
         ],
     },
     "cloudwatch": {
@@ -97,6 +101,7 @@ SERVICE_CATALOG = {
             {"name": "DescribeLogGroups", "validation": "passed"},
             {"name": "CreateLogGroup / CreateLogStream", "validation": "passed"},
             {"name": "PutLogEvents / GetLogEvents", "validation": "passed"},
+            {"name": "DeleteLogGroup (session-owned)", "validation": "not validated"},
             {"name": "GetMetricData / GetMetricStatistics", "validation": "not validated"},
         ],
         "limitations": ["The initial metrics probe was empty. One temporary log group/event was read through the dashboard and then removed."],
