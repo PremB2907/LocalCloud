@@ -591,7 +591,8 @@ function serviceControls(key, data) {
     const opts = selectOptions(data.queues, "url", "name");
     const queueRows = data.queues.map((q) =>
       `<div class="action-list-row"><span><strong>${escapeHtml(q.name)}</strong><small class="mono">${escapeHtml(q.url)}</small></span>` +
-      `<button class="secondary-button" data-action="queue-attributes" data-queue="${escapeHtml(q.url)}">Attributes</button></div>`
+      `<div class="action-list-buttons"><button class="secondary-button" data-action="queue-attributes" data-queue="${escapeHtml(q.url)}">Attributes</button>` +
+      `${q.console_owned ? `<button class="danger-button" data-action="delete-queue" data-queue="${escapeHtml(q.url)}" data-queue-name="${escapeHtml(q.name)}">Delete</button>` : ""}</div></div>`
     ).join("");
     return `
       ${panel("Create Standard Queue", "Live Floci operation",
@@ -622,7 +623,8 @@ function serviceControls(key, data) {
     const opts = selectOptions(data.topics, "arn", "name");
     const topicRows = data.topics.map((t) =>
       `<div class="action-list-row"><span class="mono">${escapeHtml(t.name)}</span>` +
-      `<button class="secondary-button" data-action="inspect-topic" data-topic="${escapeHtml(t.arn)}">Subscriptions</button></div>`
+      `<div class="action-list-buttons"><button class="secondary-button" data-action="inspect-topic" data-topic="${escapeHtml(t.arn)}">Subscriptions</button>` +
+      `${t.console_owned ? `<button class="danger-button" data-action="delete-topic" data-topic="${escapeHtml(t.arn)}" data-topic-name="${escapeHtml(t.name)}">Delete</button>` : ""}</div></div>`
     ).join("");
     return `
       ${panel("Create Topic", "Live Floci operation",
@@ -631,8 +633,8 @@ function serviceControls(key, data) {
           <button class="primary-button" type="submit">Create topic</button>
         </form>`
       )}
-      ${panel("Publish Message", "Requires zero subscriptions — server validates before publish",
-        `<div class="warn-band safety-note">Publishing is blocked if the selected topic has any subscriptions. The server re-checks immediately before publishing.</div>
+      ${panel("Publish Message", "Delivers to local SQS subscriptions",
+        `<div class="warn-band safety-note">Publishing is allowed only when every subscription targets a local SQS queue in this Floci account and region. Email, HTTP, Lambda, and other endpoints are blocked.</div>
         <form class="action-form" data-action="publish-message">
           <label>Topic<select name="topic_arn" required ${data.topics.length ? "" : "disabled"}>${opts}</select></label>
           <label>Message<textarea name="message" required maxlength="262144" rows="3" placeholder="Local test message"></textarea></label>
@@ -651,7 +653,8 @@ function serviceControls(key, data) {
             <option value="sqs">sqs</option>
             <option value="lambda">lambda</option>
           </select></label>
-          <label>Endpoint<input name="endpoint" required placeholder="user@example.com" autocomplete="off"></label>
+          <label>Endpoint<input name="endpoint" required placeholder="user@example.com or local SQS ARN" autocomplete="off"></label>
+          <span class="form-note">For SQS fan-out, use the ARN shown in SQS &gt; Attributes. Publishing supports only local SQS endpoints.</span>
           <button class="primary-button" type="submit" ${data.topics.length ? "" : "disabled"}>Subscribe</button>
         </form>`
       )}
@@ -673,7 +676,8 @@ function serviceControls(key, data) {
     ).join("");
     const httpApiRows = httpApis.map((api) =>
       `<div class="action-list-row"><span><strong>${escapeHtml(api.name)}</strong><small class="mono">${escapeHtml(api.id)}</small></span>` +
-      `<div class="action-list-buttons"><button class="secondary-button" data-action="inspect-http-routes" data-api-id="${escapeHtml(api.id)}">Routes</button></div></div>`
+      `<div class="action-list-buttons"><button class="secondary-button" data-action="inspect-http-routes" data-api-id="${escapeHtml(api.id)}">Routes</button>` +
+      `${api.console_owned ? `<button class="danger-button" data-action="delete-http-api" data-api-id="${escapeHtml(api.id)}" data-api-name="${escapeHtml(api.name)}">Delete</button>` : ""}</div></div>`
     ).join("");
     return `
       ${panel("Create REST API", "Does not deploy or expose a public stage",
@@ -686,16 +690,24 @@ function serviceControls(key, data) {
       ${apis.length
         ? `<section class="panel"><div class="panel-heading"><h3>REST APIs</h3><span class="panel-meta">Management calls remain local</span></div><div class="action-list">${apiRows}</div></section>`
         : ""}
-      ${panel("Create HTTP API", "HTTP API with a default $default stage",
+      ${panel("Create HTTP API", "Creates a local $default stage",
         `<form class="action-form" data-action="create-http-api">
           <label>API name<input name="name" required maxlength="128" placeholder="localcloud-demo-http-api" autocomplete="off"></label>
           <button class="primary-button" type="submit">Create HTTP API</button>
         </form>`
       )}
       ${httpApis.length
-        ? `<section class="panel"><div class="panel-heading"><h3>HTTP APIs</h3><span class="panel-meta">Routes + invoke via Floci test endpoint</span></div><div class="action-list">${httpApiRows}</div></section>`
+        ? `<section class="panel"><div class="panel-heading"><h3>HTTP APIs</h3><span class="panel-meta">Lambda-backed routes · local $default stage</span></div><div class="action-list">${httpApiRows}</div></section>`
         : ""}
-      ${panel("Invoke HTTP API", "Send a request through the Floci invoke endpoint",
+      ${httpApis.length ? panel("Add Lambda Route", "Connect an HTTP API route to a local Lambda function",
+        `<form class="action-form" data-action="create-http-route">
+          <label>HTTP API<select name="api_id" required>${httpApiSelect}</select></label>
+          <label>Route key<input name="route_key" required value="GET /hello" placeholder="GET /hello" autocomplete="off"></label>
+          <label>Lambda function name<input name="function_name" required pattern="[A-Za-z0-9_-]{1,64}" placeholder="localcloud-hello" autocomplete="off"></label>
+          <span class="form-note">Create the function on the Lambda page first. Route uses unauthenticated local AWS_PROXY integration.</span>
+          <button class="primary-button" type="submit">Add route</button>
+        </form>`) : ""}
+      ${panel("Invoke HTTP API", "Send a request to the selected API's local $default stage",
         `<form class="action-form" data-action="invoke-http-api">
           <label>API<select name="api_id" required ${httpApis.length ? "" : "disabled"}>${httpApiSelect}</select></label>
           <label>Method<select name="method">
@@ -705,7 +717,7 @@ function serviceControls(key, data) {
             <option value="DELETE">DELETE</option>
             <option value="PATCH">PATCH</option>
           </select></label>
-          <label>Path<input name="path" value="/" placeholder="/" autocomplete="off"></label>
+          <label>Path<input name="path" value="/hello" placeholder="/hello" autocomplete="off"></label>
           <label>Body (JSON, optional)<textarea name="body" rows="2" placeholder='{"hello":"world"}'></textarea></label>
           <button class="primary-button" type="submit" ${httpApis.length ? "" : "disabled"}>Invoke</button>
         </form>`
@@ -714,15 +726,42 @@ function serviceControls(key, data) {
 
   if (key === "cloudwatch") {
     const groups = data.log_groups.ok ? data.log_groups.log_groups : [];
+    const ownedGroups = groups.filter((group) => group.console_owned);
+    const groupOptions = ownedGroups.length
+      ? selectOptions(ownedGroups, "name", "name")
+      : `<option value="">Create a log group first</option>`;
     const logRows = groups.map((g) =>
       `<div class="action-list-row"><span class="mono">${escapeHtml(g.name)}</span>` +
-      `<button class="secondary-button" data-action="inspect-log-group" data-group="${escapeHtml(g.name)}">List streams</button></div>`
+      `<div class="action-list-buttons"><button class="secondary-button" data-action="inspect-log-group" data-group="${escapeHtml(g.name)}">List streams</button>` +
+      `${g.console_owned ? `<button class="danger-button" data-action="delete-log-group" data-group="${escapeHtml(g.name)}">Delete</button>` : ""}</div></div>`
     ).join("");
     const metricsErr = data.metrics.ok ? "" : `<div class="error-band">CloudWatch Metrics request failed: ${escapeHtml(data.metrics.error.message)}</div>`;
     const logsErr    = data.log_groups.ok ? "" : `<div class="error-band">CloudWatch Logs request failed: ${escapeHtml(data.log_groups.error.message)}</div>`;
-    return `${metricsErr}${logsErr}${groups.length
-      ? `<section class="panel"><div class="panel-heading"><h3>Log Group Explorer</h3><span class="panel-meta">Read-only event inspection</span></div><div class="action-list">${logRows}</div></section>`
-      : ""}`;
+    return `${metricsErr}${logsErr}
+      ${panel("Create Log Group", "New groups are owned by this dashboard session",
+        `<form class="action-form" data-action="create-log-group">
+          <label>Log group name<input name="group_name" required maxlength="512" pattern="[A-Za-z0-9_./#\\-]+" placeholder="/localcloud/application" autocomplete="off"></label>
+          <button class="primary-button" type="submit">Create log group</button>
+        </form>`
+      )}
+      ${panel("Create Log Stream", "Writes are limited to groups created in this session",
+        `<form class="action-form" data-action="create-log-stream">
+          <label>Log group<select name="group_name" required ${ownedGroups.length ? "" : "disabled"}>${groupOptions}</select></label>
+          <label>Log stream name<input name="stream_name" required maxlength="512" pattern="[A-Za-z0-9_./#\\-]+" placeholder="application" autocomplete="off"></label>
+          <button class="primary-button" type="submit" ${ownedGroups.length ? "" : "disabled"}>Create log stream</button>
+        </form>`
+      )}
+      ${panel("Write Log Event", "One timestamped event · max 256 KiB",
+        `<form class="action-form" data-action="put-log-event">
+          <label>Log group<select name="group_name" required ${ownedGroups.length ? "" : "disabled"}>${groupOptions}</select></label>
+          <label>Log stream<input name="stream_name" required maxlength="512" placeholder="application" autocomplete="off"></label>
+          <label>Message<textarea name="message" required maxlength="262144" rows="3" placeholder="Application event"></textarea></label>
+          <button class="primary-button" type="submit" ${ownedGroups.length ? "" : "disabled"}>Put log event</button>
+        </form>`
+      )}
+      ${groups.length
+        ? `<section class="panel"><div class="panel-heading"><h3>Log Group Explorer</h3><span class="panel-meta">List streams and inspect events</span></div><div class="action-list">${logRows}</div></section>`
+        : ""}`;
   }
 
   if (key === "ec2") {
@@ -735,19 +774,21 @@ function serviceControls(key, data) {
     const typeOptions = ["t2.micro", "t3.micro", "t3.small", "t3.medium", "m5.large"]
       .map((t) => `<option value="${t}">${t}</option>`).join("");
     const instanceRows = data.instances.map((inst) => {
-      const canTerminate = true; // terminate is ownership-checked server-side
+      const canConnect = inst.state === "running";
       const actionBtns =
+        `<button class="secondary-button" data-action="ec2-connect" data-instance-id="${escapeHtml(inst.id)}" ${canConnect ? "" : "disabled"}>${canConnect ? "Open Shell" : "Not running"}</button>` +
         `<button class="secondary-button" data-action="ec2-start" data-instance-id="${escapeHtml(inst.id)}">Start</button>` +
         `<button class="secondary-button" data-action="ec2-stop" data-instance-id="${escapeHtml(inst.id)}">Stop</button>` +
         `<button class="danger-button" data-action="ec2-terminate" data-instance-id="${escapeHtml(inst.id)}" data-instance-name="${escapeHtml(inst.name || inst.id)}">Terminate</button>`;
-      return `<div class="action-list-row"><span><strong>${escapeHtml(inst.id)}</strong>${inst.name ? ` <small>${escapeHtml(inst.name)}</small>` : ""}<small class="mono">${escapeHtml(inst.state)} · ${escapeHtml(inst.instance_type)}</small></span><div class="action-list-buttons">${actionBtns}</div></div>`;
+      return `<div class="action-list-row"><span><strong>${escapeHtml(inst.id)}</strong>${inst.name ? ` <small>${escapeHtml(inst.name)}</small>` : ""}<small class="mono">${escapeHtml(inst.state)} · ${escapeHtml(inst.instance_type)} · Docker-backed local instance</small></span><div class="action-list-buttons">${actionBtns}</div></div>`;
     }).join("");
     return `
-      ${panel("Launch Instance", "Floci launches a Docker container per instance",
+      ${panel("Launch Instance", "Floci runs each instance as a local Docker container",
         `<form class="action-form" data-action="run-instances">
           <label>AMI<select name="image_id" required>${amiOptions}</select></label>
           <label>Instance type<select name="instance_type" required>${typeOptions}</select></label>
           <label>Name (optional tag)<input name="name" maxlength="128" placeholder="localcloud-demo-instance" autocomplete="off"></label>
+          <span class="form-note">For a running instance, choose Open Shell and paste the displayed Docker command into PowerShell or a terminal.</span>
           <label>Count<select name="count"><option value="1" selected>1</option><option value="2">2</option><option value="3">3</option></select></label>
           <button class="primary-button" type="submit">Launch instance</button>
         </form>`
@@ -1066,15 +1107,39 @@ async function handleFormSubmit(event) {
     } else if (action === "create-topic") {
       result = await postJson("/api/services/sns/topics", values);
     } else if (action === "publish-message") {
-      if (!await confirmExact("Publish local message", "The server publishes only if this Floci topic has no subscriptions.", "PUBLISH", "Publish")) {
+      if (!await confirmExact("Publish local message", "Delivery is permitted only to local SQS queues; other subscription protocols are blocked.", "PUBLISH", "Publish")) {
         if (submitBtn && !wasDisabled) submitBtn.disabled = false;
         return;
       }
       result = await postJson("/api/services/sns/publish", values);
     } else if (action === "subscribe-topic") {
       result = await postJson("/api/services/sns/subscribe", values);
+    } else if (action === "create-log-group") {
+      result = await postJson("/api/services/cloudwatch/log-groups", values);
+    } else if (action === "create-log-stream") {
+      result = await postJson("/api/services/cloudwatch/log-streams", values);
+    } else if (action === "put-log-event") {
+      result = await postJson("/api/services/cloudwatch/events", values);
     } else if (action === "create-rest-api") {
       result = await postJson("/api/services/api_gateway/rest", values);
+    } else if (action === "create-http-api") {
+      result = await postJson("/api/services/api_gateway/http", values);
+    } else if (action === "create-http-route") {
+      result = await postJson("/api/services/api_gateway/http/routes", values);
+    } else if (action === "invoke-http-api") {
+      let body;
+      try { body = values.body ? JSON.parse(values.body) : undefined; }
+      catch { throw Object.assign(new Error("Body must be valid JSON."), { code: "ValidationError" }); }
+      result = await postJson("/api/services/api_gateway/http/invoke", {
+        api_id: values.api_id,
+        method: values.method,
+        path: values.path,
+        ...(body === undefined ? {} : { body }),
+      });
+      showDetail("HTTP API Response", [{ status_code: result.status_code, body: result.body }], [["status_code","Status"],["body","Response body"]]);
+      toast(`HTTP API returned ${result.status_code}.`);
+      if (submitBtn && !wasDisabled) submitBtn.disabled = false;
+      return;
     } else if (action === "run-instances") {
       result = await postJson("/api/services/ec2/instances", { ...values, count: Number(values.count || 1) });
     } else if (action === "create-function") {
@@ -1112,11 +1177,18 @@ function actionLabel(action) {
     "create-table":   "CreateTable",
     "put-item":       "PutItem",
     "create-queue":   "CreateQueue",
+    "delete-queue":   "DeleteQueue",
     "send-message":   "SendMessage",
     "create-topic":   "CreateTopic",
+    "delete-topic":   "DeleteTopic",
     "publish-message":"Publish",
     "subscribe-topic":"Subscribe",
+    "create-log-group":"CreateLogGroup",
+    "create-log-stream":"CreateLogStream",
+    "put-log-event":"PutLogEvents",
     "create-rest-api":"CreateRestApi",
+    "create-http-api":"CreateApi",
+    "create-http-route":"CreateRoute",
     "run-instances":  "RunInstances",
     "create-function":"CreateFunction",
     "invoke-function":"Invoke",
@@ -1163,6 +1235,18 @@ async function handleActionClick(event) {
       const r = await requestJson(`/api/services/sqs/attributes?queue_url=${encodeURIComponent(button.dataset.queue)}`);
       showDetail("Queue Attributes", Object.entries(r.attributes).map(([name, value]) => ({ name, value })), [["name","Attribute"],["value","Value"]]);
 
+    } else if (action === "delete-queue") {
+      const name = button.dataset.queueName;
+      if (!await confirmExact("Delete SQS Queue", "Removes the queue and any messages it contains.", name, "Delete queue")) return;
+      await postJson("/api/services/sqs/queues/delete", {
+        queue_url: button.dataset.queue,
+        name,
+        confirmed: true,
+        confirm_value: name,
+      });
+      toast("DeleteQueue succeeded.");
+      await navigate("sqs");
+
     } else if (action === "delete-message") {
       const id = button.dataset.messageId;
       if (!await confirmExact("Delete SQS Message", "Only this received message will be deleted.", id, "Delete message")) return;
@@ -1187,6 +1271,18 @@ async function handleActionClick(event) {
       const rows = r.subscriptions.map((s) => ({ protocol: s.Protocol, endpoint: s.Endpoint, status: s.SubscriptionArn }));
       showDetail("Topic Subscriptions", rows, [["protocol","Protocol"],["endpoint","Endpoint"],["status","Subscription ARN"]]);
 
+    } else if (action === "delete-topic") {
+      const name = button.dataset.topicName;
+      if (!await confirmExact("Delete SNS Topic", "Removes this topic and all its subscriptions.", name, "Delete topic")) return;
+      await postJson("/api/services/sns/topics/delete", {
+        topic_arn: button.dataset.topic,
+        name,
+        confirmed: true,
+        confirm_value: name,
+      });
+      toast("DeleteTopic succeeded.");
+      await navigate("sns");
+
     } else if (action === "inspect-rest-api") {
       const r = await requestJson(`/api/services/api_gateway/rest/${encodeURIComponent(button.dataset.apiId)}/resources`);
       showDetail("REST API Resources", r.resources, [["path","Path"],["id","Resource ID"],["methods","Methods"]]);
@@ -1196,6 +1292,17 @@ async function handleActionClick(event) {
       if (!await confirmExact("Delete REST API", "Removes only the API created in this session.", name, "Delete API")) return;
       await postJson("/api/services/api_gateway/rest/delete", { api_id: button.dataset.apiId, name, confirmed: true, confirm_value: name });
       toast("DeleteRestApi succeeded.");
+      await navigate("api_gateway");
+
+    } else if (action === "inspect-http-routes") {
+      const r = await requestJson(`/api/services/api_gateway/http/${encodeURIComponent(button.dataset.apiId)}/routes`);
+      showDetail("HTTP API Routes", r.routes, [["key","Route"],["target","Integration"],["authorization_type","Authorization"]]);
+
+    } else if (action === "delete-http-api") {
+      const name = button.dataset.apiName;
+      if (!await confirmExact("Delete HTTP API", "Removes only the API created in this session.", name, "Delete API")) return;
+      await postJson("/api/services/api_gateway/http/delete", { api_id: button.dataset.apiId, name, confirmed: true, confirm_value: name });
+      toast("DeleteApi succeeded.");
       await navigate("api_gateway");
 
     } else if (action === "inspect-log-group") {
@@ -1220,10 +1327,28 @@ async function handleActionClick(event) {
       const r = await requestJson(`/api/services/cloudwatch/events?${query}`);
       showDetail("Log Events", r.events, [["timestamp","Timestamp"],["message","Message"]]);
 
+    } else if (action === "delete-log-group") {
+      const group = button.dataset.group;
+      if (!await confirmExact("Delete CloudWatch Log Group", "Removes the log group and all of its streams and events.", group, "Delete log group")) return;
+      await postJson("/api/services/cloudwatch/log-groups/delete", {
+        group_name: group,
+        confirmed: true,
+        confirm_value: group,
+      });
+      toast("DeleteLogGroup succeeded.");
+      await navigate("cloudwatch");
+
     } else if (action === "ec2-start") {
       await postJson("/api/services/ec2/instances/start", { instance_ids: [button.dataset.instanceId] });
       toast("StartInstances succeeded.");
       await navigate("ec2");
+
+    } else if (action === "ec2-connect") {
+      const result = await requestJson(`/api/services/ec2/instances/${encodeURIComponent(button.dataset.instanceId)}/connect`);
+      showDetail("Local Container Shell", [result.connection], [
+        ["command","Run this in PowerShell or a terminal"],
+        ["note","What opens"],
+      ]);
 
     } else if (action === "ec2-stop") {
       await postJson("/api/services/ec2/instances/stop", { instance_ids: [button.dataset.instanceId] });

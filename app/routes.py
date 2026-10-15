@@ -5,7 +5,8 @@ import time
 from datetime import datetime
 from io import BytesIO
 from urllib.parse import urlsplit
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
+from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 from botocore.exceptions import BotoCoreError, ClientError
@@ -21,10 +22,13 @@ TABLE_PATTERN = re.compile(r"^[A-Za-z0-9_.-]{3,255}$")
 QUEUE_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
 TOPIC_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,256}$")
 API_NAME_PATTERN = re.compile(r"^[A-Za-z0-9 ._-]{1,128}$")
+API_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+HTTP_ROUTE_PATTERN = re.compile(r"^(GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD|ANY) /[A-Za-z0-9_./{}+:-]*$")
 INSTANCE_ID_PATTERN = re.compile(r"^i-[A-Za-z0-9]+$")
 FUNCTION_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 AMI_ID_PATTERN = re.compile(r"^ami-[A-Za-z0-9]+$")
 INSTANCE_TYPE_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9]*\.[A-Za-z0-9]+$")
+LOG_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_./#-]{1,512}$")
 RUNTIME_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
 HANDLER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*$")
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
@@ -135,13 +139,16 @@ def _load_service(service_name):
         owned = current_app.extensions["console_created_tables"]
         return {"tables": [{**table, "console_owned": table["name"] in owned} for table in dynamodb.list_tables(clients.get("dynamodb"))]}
     if service_name == "sqs":
-        return {"queues": sqs.list_queues(clients.get("sqs"))}
+        owned = current_app.extensions["console_created_queues"]
+        return {"queues": [{**queue, "console_owned": queue["url"] in owned} for queue in sqs.list_queues(clients.get("sqs"))]}
     if service_name == "sns":
-        return {"topics": sns.list_topics(clients.get("sns"))}
+        owned = current_app.extensions["console_created_topics"]
+        return {"topics": [{**topic, "console_owned": topic["arn"] in owned} for topic in sns.list_topics(clients.get("sns"))]}
     if service_name == "lambda":
         return {"functions": lambda_functions.list_functions(clients.get("lambda"))}
     if service_name == "ec2":
-        return {"instances": ec2.list_instances(clients.get("ec2"))}
+        client = clients.get("ec2")
+        return {"instances": ec2.list_instances(client)}
     if service_name == "cloudwatch":
         data = {}
         for key, service_client, loader in (
@@ -153,6 +160,12 @@ def _load_service(service_name):
             except (ClientError, BotoCoreError) as error:
                 detail, status = _safe_error(error)
                 data[key] = {"ok": False, "error": detail, "http_status": status}
+        if data["log_groups"]["ok"]:
+            owned = current_app.extensions["console_created_log_groups"]
+            data["log_groups"]["log_groups"] = [
+                {**group, "console_owned": group["name"] in owned}
+                for group in data["log_groups"]["log_groups"]
+            ]
         return data
     if service_name == "api_gateway":
         data = {}
@@ -163,8 +176,7 @@ def _load_service(service_name):
         ):
             try:
                 result = loader(clients.get(service_client))
-                if key == "rest":
-                    result["apis"] = [{**api, "console_owned": api["id"] in owned} for api in result["apis"]]
+                result["apis"] = [{**api, "console_owned": api["id"] in owned} for api in result["apis"]]
                 data[key] = {"ok": True, **result}
             except (ClientError, BotoCoreError) as error:
                 detail, status = _safe_error(error)
@@ -266,6 +278,84 @@ def get_cloudwatch_events():
     except (ClientError, BotoCoreError) as error:
         detail, status = _safe_error(error)
         return jsonify({"ok": False, "error": detail}), status
+
+
+@console.post("/api/services/cloudwatch/log-groups")
+def post_cloudwatch_log_group():
+    group_name = _body().get("group_name", "")
+    if not isinstance(group_name, str) or not LOG_NAME_PATTERN.fullmatch(group_name):
+        return jsonify({"ok": False, "error": {"code": "ValidationError", "message": "Enter a valid log group name (up to 512 letters, numbers, slash, dot, underscore, hash, or hyphen characters)."}}), 400
+    try:
+        response = cloudwatch.create_log_group(_client("logs"), group_name)
+        current_app.extensions["console_created_log_groups"].add(group_name)
+        _record_operation("CreateLogGroup", group_name, "Succeeded")
+        return jsonify({"ok": True, "resource": {"name": group_name}, "http_status": response["ResponseMetadata"]["HTTPStatusCode"]}), 201
+    except (ClientError, BotoCoreError) as error:
+        _record_operation("CreateLogGroup", group_name, "Failed")
+        return _operation_error(error)
+
+
+@console.post("/api/services/cloudwatch/log-streams")
+def post_cloudwatch_log_stream():
+    payload = _body()
+    group_name = payload.get("group_name", "")
+    stream_name = payload.get("stream_name", "")
+    if not isinstance(group_name, str) or not LOG_NAME_PATTERN.fullmatch(group_name):
+        return jsonify({"ok": False, "error": {"code": "ValidationError", "message": "Enter a valid log group name."}}), 400
+    if not isinstance(stream_name, str) or not LOG_NAME_PATTERN.fullmatch(stream_name):
+        return jsonify({"ok": False, "error": {"code": "ValidationError", "message": "Enter a valid log stream name."}}), 400
+    if group_name not in current_app.extensions["console_created_log_groups"]:
+        return jsonify({"ok": False, "error": {"code": "LogGroupNotOwnedByConsole", "message": "Create the log group in this dashboard session before adding streams."}}), 403
+    try:
+        response = cloudwatch.create_log_stream(_client("logs"), group_name, stream_name)
+        _record_operation("CreateLogStream", f"{group_name}/{stream_name}", "Succeeded")
+        return jsonify({"ok": True, "resource": {"group_name": group_name, "stream_name": stream_name}, "http_status": response["ResponseMetadata"]["HTTPStatusCode"]}), 201
+    except (ClientError, BotoCoreError) as error:
+        _record_operation("CreateLogStream", f"{group_name}/{stream_name}", "Failed")
+        return _operation_error(error)
+
+
+@console.post("/api/services/cloudwatch/events")
+def post_cloudwatch_log_event():
+    payload = _body()
+    group_name = payload.get("group_name", "")
+    stream_name = payload.get("stream_name", "")
+    message = payload.get("message", "")
+    if not isinstance(group_name, str) or not LOG_NAME_PATTERN.fullmatch(group_name):
+        return jsonify({"ok": False, "error": {"code": "ValidationError", "message": "Enter a valid log group name."}}), 400
+    if not isinstance(stream_name, str) or not LOG_NAME_PATTERN.fullmatch(stream_name):
+        return jsonify({"ok": False, "error": {"code": "ValidationError", "message": "Enter a valid log stream name."}}), 400
+    if not isinstance(message, str) or not message or len(message.encode("utf-8")) > 262144:
+        return jsonify({"ok": False, "error": {"code": "ValidationError", "message": "Log messages must be non-empty and no larger than 256 KiB."}}), 400
+    if group_name not in current_app.extensions["console_created_log_groups"]:
+        return jsonify({"ok": False, "error": {"code": "LogGroupNotOwnedByConsole", "message": "Writes are limited to log groups created in this dashboard session."}}), 403
+    try:
+        response = cloudwatch.put_log_event(_client("logs"), group_name, stream_name, message)
+        _record_operation("PutLogEvents", f"{group_name}/{stream_name}", "Succeeded")
+        return jsonify({"ok": True, "resource": {"group_name": group_name, "stream_name": stream_name}, "http_status": response["ResponseMetadata"]["HTTPStatusCode"]}), 201
+    except (ClientError, BotoCoreError) as error:
+        _record_operation("PutLogEvents", f"{group_name}/{stream_name}", "Failed")
+        return _operation_error(error)
+
+
+@console.post("/api/services/cloudwatch/log-groups/delete")
+def post_cloudwatch_delete_log_group():
+    payload = _body()
+    group_name = payload.get("group_name", "")
+    if not isinstance(group_name, str) or not LOG_NAME_PATTERN.fullmatch(group_name):
+        return jsonify({"ok": False, "error": {"code": "ValidationError", "message": "Enter a valid log group name."}}), 400
+    if group_name not in current_app.extensions["console_created_log_groups"]:
+        return jsonify({"ok": False, "error": {"code": "LogGroupNotOwnedByConsole", "message": "Only log groups created in this dashboard session can be deleted here."}}), 403
+    if not _confirmation(payload, group_name):
+        return jsonify({"ok": False, "error": {"code": "ConfirmationRequired", "message": "Type the exact log group name to confirm deletion."}}), 400
+    try:
+        response = cloudwatch.delete_log_group(_client("logs"), group_name)
+        current_app.extensions["console_created_log_groups"].discard(group_name)
+        _record_operation("DeleteLogGroup", group_name, "Succeeded")
+        return jsonify({"ok": True, "http_status": response["ResponseMetadata"]["HTTPStatusCode"]})
+    except (ClientError, BotoCoreError) as error:
+        _record_operation("DeleteLogGroup", group_name, "Failed")
+        return _operation_error(error)
 
 
 @console.get("/api/services/s3/buckets/<bucket_name>/objects/<path:key>/download")
@@ -416,10 +506,34 @@ def post_sqs_queue():
         return jsonify({"ok": False, "error": {"code": "ValidationError", "message": "Use a standard queue name containing 1 to 80 letters, numbers, underscores, or hyphens."}}), 400
     try:
         response = sqs.create_standard_queue(_client("sqs"), name)
+        current_app.extensions["console_created_queues"].add(response["QueueUrl"])
         _record_operation("CreateQueue", name, "Succeeded")
         return jsonify({"ok": True, "resource": {"url": response["QueueUrl"]}, "http_status": response["ResponseMetadata"]["HTTPStatusCode"]}), 201
     except (ClientError, BotoCoreError, ValueError) as error:
         _record_operation("CreateQueue", name, "Failed")
+        return _operation_error(error)
+
+
+@console.post("/api/services/sqs/queues/delete")
+def post_sqs_delete_queue():
+    payload = _body()
+    queue_url = payload.get("queue_url", "")
+    name = payload.get("name", "")
+    if not isinstance(queue_url, str) or not _safe_queue_url(queue_url):
+        return jsonify({"ok": False, "error": {"code": "InvalidQueueUrl", "message": "Queue URLs must point to the local Floci endpoint."}}), 400
+    if not isinstance(name, str) or not QUEUE_PATTERN.fullmatch(name):
+        return jsonify({"ok": False, "error": {"code": "ValidationError", "message": "Enter a valid standard queue name."}}), 400
+    if queue_url not in current_app.extensions["console_created_queues"]:
+        return jsonify({"ok": False, "error": {"code": "QueueNotOwnedByConsole", "message": "Only queues created in this dashboard session can be deleted here."}}), 403
+    if not _confirmation(payload, name):
+        return jsonify({"ok": False, "error": {"code": "ConfirmationRequired", "message": "Type the exact queue name to confirm deletion."}}), 400
+    try:
+        response = _client("sqs").delete_queue(QueueUrl=queue_url)
+        current_app.extensions["console_created_queues"].discard(queue_url)
+        _record_operation("DeleteQueue", name, "Succeeded")
+        return jsonify({"ok": True, "http_status": response["ResponseMetadata"]["HTTPStatusCode"]})
+    except (ClientError, BotoCoreError) as error:
+        _record_operation("DeleteQueue", name, "Failed")
         return _operation_error(error)
 
 
@@ -516,10 +630,34 @@ def post_sns_topic():
         return jsonify({"ok": False, "error": {"code": "ValidationError", "message": "Enter a valid standard SNS topic name; FIFO topics are not exposed in this console."}}), 400
     try:
         response = sns.create_topic(_client("sns"), name)
+        current_app.extensions["console_created_topics"].add(response["TopicArn"])
         _record_operation("CreateTopic", name, "Succeeded")
         return jsonify({"ok": True, "resource": {"arn": response["TopicArn"]}, "http_status": response["ResponseMetadata"]["HTTPStatusCode"]}), 201
     except (ClientError, BotoCoreError, ValueError) as error:
         _record_operation("CreateTopic", name, "Failed")
+        return _operation_error(error)
+
+
+@console.post("/api/services/sns/topics/delete")
+def post_sns_delete_topic():
+    payload = _body()
+    topic_arn = payload.get("topic_arn", "")
+    name = payload.get("name", "")
+    if not isinstance(topic_arn, str) or not _safe_topic_arn(topic_arn):
+        return jsonify({"ok": False, "error": {"code": "ValidationError", "message": "Choose a local SNS topic ARN."}}), 400
+    if not isinstance(name, str) or name != topic_arn.rsplit(":", 1)[-1]:
+        return jsonify({"ok": False, "error": {"code": "ValidationError", "message": "Topic name does not match its ARN."}}), 400
+    if topic_arn not in current_app.extensions["console_created_topics"]:
+        return jsonify({"ok": False, "error": {"code": "TopicNotOwnedByConsole", "message": "Only topics created in this dashboard session can be deleted here."}}), 403
+    if not _confirmation(payload, name):
+        return jsonify({"ok": False, "error": {"code": "ConfirmationRequired", "message": "Type the exact topic name to confirm deletion."}}), 400
+    try:
+        response = _client("sns").delete_topic(TopicArn=topic_arn)
+        current_app.extensions["console_created_topics"].discard(topic_arn)
+        _record_operation("DeleteTopic", name, "Succeeded")
+        return jsonify({"ok": True, "http_status": response["ResponseMetadata"]["HTTPStatusCode"]})
+    except (ClientError, BotoCoreError) as error:
+        _record_operation("DeleteTopic", name, "Failed")
         return _operation_error(error)
 
 
@@ -530,7 +668,8 @@ def post_sns_publish():
     if not _safe_topic_arn(topic_arn) or not isinstance(message, str) or not message or len(message.encode("utf-8")) > 262144:
         return jsonify({"ok": False, "error": {"code": "ValidationError", "message": "Choose a local topic and a non-empty message under 256 KiB."}}), 400
     try:
-        response = sns.publish_if_unsubscribed(_client("sns"), topic_arn, message)
+        region = current_app.extensions["floci_config"].region
+        response = sns.publish_to_local_sqs(_client("sns"), topic_arn, message, region)
         _record_operation("Publish", topic_arn.rsplit(":", 1)[-1], "Succeeded")
         return jsonify({"ok": True, "message_id": response.get("MessageId"), "http_status": response["ResponseMetadata"]["HTTPStatusCode"]}), 201
     except sns.TopicHasSubscriptions as error:
@@ -636,6 +775,37 @@ def get_http_api_routes(api_id):
         return jsonify({"ok": False, "error": detail}), status
 
 
+@console.post("/api/services/api_gateway/http/routes")
+def post_http_api_route():
+    payload = _body()
+    api_id = payload.get("api_id", "")
+    route_key = payload.get("route_key", "")
+    function_name = payload.get("function_name", "")
+    if not isinstance(api_id, str) or not API_ID_PATTERN.fullmatch(api_id):
+        return jsonify({"ok": False, "error": {"code": "ValidationError", "message": "Choose a valid HTTP API."}}), 400
+    if api_id not in current_app.extensions["console_created_apis"]:
+        return jsonify({"ok": False, "error": {"code": "ApiNotOwnedByConsole", "message": "Routes can only be added to an HTTP API created in this dashboard session."}}), 403
+    if not isinstance(route_key, str) or not HTTP_ROUTE_PATTERN.fullmatch(route_key):
+        return jsonify({"ok": False, "error": {"code": "ValidationError", "message": "Route must be an HTTP method and a path, for example GET /hello."}}), 400
+    if not isinstance(function_name, str) or not FUNCTION_NAME_PATTERN.fullmatch(function_name):
+        return jsonify({"ok": False, "error": {"code": "ValidationError", "message": "Enter a valid Lambda function name."}}), 400
+    try:
+        region = current_app.extensions["floci_config"].region
+        route = api_gateway.create_http_lambda_route(
+            _client("apigatewayv2"),
+            _client("lambda"),
+            api_id,
+            route_key,
+            function_name,
+            region,
+        )
+        _record_operation("CreateRoute", f"{api_id} {route_key}", "Succeeded")
+        return jsonify({"ok": True, "resource": route, "http_status": 201}), 201
+    except (ClientError, BotoCoreError, ValueError) as error:
+        _record_operation("CreateRoute", f"{api_id} {route_key}", "Failed")
+        return _operation_error(error)
+
+
 @console.post("/api/services/api_gateway/http")
 def post_http_api():
     name = _body().get("name", "")
@@ -651,20 +821,43 @@ def post_http_api():
         return _operation_error(error)
 
 
+@console.post("/api/services/api_gateway/http/delete")
+def post_http_api_delete():
+    payload = _body()
+    api_id = payload.get("api_id", "")
+    api_name = payload.get("name", "")
+    if not isinstance(api_id, str) or not API_ID_PATTERN.fullmatch(api_id):
+        return jsonify({"ok": False, "error": {"code": "ValidationError", "message": "Choose a valid HTTP API."}}), 400
+    if api_id not in current_app.extensions["console_created_apis"]:
+        return jsonify({"ok": False, "error": {"code": "ApiNotOwnedByConsole", "message": "Only HTTP APIs created in this dashboard session can be deleted here."}}), 403
+    if not isinstance(api_name, str) or not api_name or not _confirmation(payload, api_name):
+        return jsonify({"ok": False, "error": {"code": "ConfirmationRequired", "message": "Confirm the exact HTTP API name before deletion."}}), 400
+    try:
+        response = api_gateway.delete_http_api(_client("apigatewayv2"), api_id)
+        current_app.extensions["console_created_apis"].discard(api_id)
+        _record_operation("DeleteApi", api_name, "Succeeded")
+        return jsonify({"ok": True, "http_status": response.get("ResponseMetadata", {}).get("HTTPStatusCode", 200)})
+    except (ClientError, BotoCoreError) as error:
+        _record_operation("DeleteApi", api_name, "Failed")
+        return _operation_error(error)
+
+
 @console.post("/api/services/api_gateway/http/invoke")
 def post_http_api_invoke():
     payload = _body()
     api_id = payload.get("api_id", "")
-    method = (payload.get("method") or "GET").upper()
+    method = payload.get("method") or "GET"
     path = payload.get("path") or "/"
-    if not isinstance(api_id, str) or not api_id:
-        return jsonify({"ok": False, "error": {"code": "ValidationError", "message": "An HTTP API ID is required."}}), 400
+    if not isinstance(api_id, str) or not API_ID_PATTERN.fullmatch(api_id):
+        return jsonify({"ok": False, "error": {"code": "ValidationError", "message": "A valid HTTP API ID is required."}}), 400
     if method not in {"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"}:
         return jsonify({"ok": False, "error": {"code": "ValidationError", "message": "Unsupported HTTP method."}}), 400
-    if not isinstance(path, str) or not path.startswith("/"):
-        return jsonify({"ok": False, "error": {"code": "ValidationError", "message": "Path must start with /."}}), 400
+    if not isinstance(path, str) or not path.startswith("/") or "?" in path or "#" in path:
+        return jsonify({"ok": False, "error": {"code": "ValidationError", "message": "Path must start with / and cannot contain a query string or fragment."}}), 400
     config = current_app.extensions["floci_config"]
-    invoke_url = f"{config.endpoint_url}/restapis/{api_id}/test/{path.lstrip('/')}"
+    endpoint = config.endpoint_url.rstrip("/")
+    invoke_path = quote(path.lstrip("/"), safe="/{}-._~")
+    invoke_url = f"{endpoint}/execute-api/{quote(api_id, safe='')}/$default/{invoke_path}"
     body = payload.get("body")
     headers = {"Content-Type": "application/json"} if body is not None else {}
     try:
@@ -680,6 +873,14 @@ def post_http_api_invoke():
                 parsed = resp_body
             _record_operation("Invoke", api_id, "Succeeded")
             return jsonify({"ok": True, "status_code": resp.status, "body": parsed})
+    except HTTPError as error:
+        body_text = error.read().decode("utf-8", errors="replace")
+        try:
+            parsed = json.loads(body_text)
+        except (ValueError, TypeError):
+            parsed = body_text
+        _record_operation("Invoke", api_id, f"HTTP {error.code}")
+        return jsonify({"ok": True, "status_code": error.code, "body": parsed})
     except (ClientError, BotoCoreError) as error:
         _record_operation("Invoke", api_id, "Failed")
         return _operation_error(error)
@@ -691,6 +892,17 @@ def post_http_api_invoke():
 # ---------------------------------------------------------------------------
 # EC2 — Docker-backed instance lifecycle
 # ---------------------------------------------------------------------------
+
+
+@console.get("/api/services/ec2/instances/<instance_id>/connect")
+def get_ec2_instance_connection(instance_id):
+    if not INSTANCE_ID_PATTERN.fullmatch(instance_id):
+        return jsonify({"ok": False, "error": {"code": "ValidationError", "message": "Enter a valid instance ID."}}), 400
+    try:
+        connection = ec2.instance_shell(_client("ec2"), instance_id)
+        return jsonify({"ok": True, "connection": connection})
+    except (ClientError, BotoCoreError, LookupError, ValueError) as error:
+        return _operation_error(error)
 
 
 @console.post("/api/services/ec2/instances")
@@ -709,7 +921,13 @@ def post_ec2_instances():
     if name and (not isinstance(name, str) or len(name) > 128):
         return jsonify({"ok": False, "error": {"code": "ValidationError", "message": "Instance name must be 128 characters or fewer."}}), 400
     try:
-        result = ec2.run_instances(_client("ec2"), image_id, instance_type, name or None, count)
+        result = ec2.run_instances(
+            _client("ec2"),
+            image_id,
+            instance_type,
+            name or None,
+            count,
+        )
         for instance_id in result["instance_ids"]:
             current_app.extensions["console_created_instances"].add(instance_id)
         _record_operation("RunInstances", f"{image_id} x{count}", "Succeeded")

@@ -22,10 +22,26 @@ def list_topics(client):
     return topics
 
 
-def publish_if_unsubscribed(client, topic_arn, message):
+def publish_to_local_sqs(client, topic_arn, message, region):
     pages = client.get_paginator("list_subscriptions_by_topic").paginate(TopicArn=topic_arn)
-    if any(page.get("Subscriptions", []) for page in pages):
-        raise TopicHasSubscriptions("Publishing was blocked because this topic has subscriptions.")
+    subscriptions = [
+        subscription
+        for page in pages
+        for subscription in page.get("Subscriptions", [])
+    ]
+    for subscription in subscriptions:
+        endpoint = subscription.get("Endpoint", "")
+        parts = endpoint.split(":")
+        is_local_sqs = (
+            subscription.get("Protocol") == "sqs"
+            and len(parts) == 6
+            and parts[:5] == ["arn", "aws", "sqs", region, "000000000000"]
+            and bool(parts[5])
+        )
+        if not is_local_sqs:
+            raise TopicHasSubscriptions(
+                "Publishing is allowed only when every subscription targets a local SQS queue."
+            )
     return client.publish(TopicArn=topic_arn, Message=message)
 
 

@@ -1,5 +1,6 @@
 import io
 import os
+import subprocess
 import time
 import uuid
 from urllib.parse import urlsplit
@@ -118,6 +119,14 @@ def test_sqs_dashboard_create_send_receive_and_confirmed_delete(app):
             "confirm_value": message["MessageId"],
         })
         assert deleted.status_code == 200
+        deleted_queue = client.post("/api/services/sqs/queues/delete", json={
+            "queue_url": queue_url,
+            "name": queue_name,
+            "confirmed": True,
+            "confirm_value": queue_name,
+        })
+        assert deleted_queue.status_code == 200, deleted_queue.json
+        queue_url = None
     finally:
         if queue_url:
             sqs.delete_queue(QueueUrl=queue_url)
@@ -141,6 +150,14 @@ def test_sns_dashboard_publish_only_to_unsubscribed_temporary_topic(app):
             "message": "Floci dashboard SNS integration",
         })
         assert published.status_code == 201 and published.json["message_id"]
+        deleted = client.post("/api/services/sns/topics/delete", json={
+            "topic_arn": topic_arn,
+            "name": topic_name,
+            "confirmed": True,
+            "confirm_value": topic_name,
+        })
+        assert deleted.status_code == 200, deleted.json
+        topic_arn = None
     finally:
         if topic_arn:
             sns.delete_topic(TopicArn=topic_arn)
@@ -176,9 +193,80 @@ def test_sns_dashboard_subscribe_to_temporary_topic(app):
             and item.get("Endpoint") == "console-integration@example.invalid"
             for item in listed.json["subscriptions"]
         )
+        deleted = client.post("/api/services/sns/topics/delete", json={
+            "topic_arn": topic_arn,
+            "name": topic_name,
+            "confirmed": True,
+            "confirm_value": topic_name,
+        })
+        assert deleted.status_code == 200, deleted.json
+        topic_arn = None
     finally:
         if topic_arn:
             sns.delete_topic(TopicArn=topic_arn)
+
+
+def test_sns_dashboard_delivers_to_local_sqs_subscription(app):
+    client = app.test_client()
+    sns = _client(app, "sns")
+    sqs = _client(app, "sqs")
+    topic_name = f"lc-console-it-fanout-{_suffix()}"
+    queue_name = f"lc-console-it-fanout-{_suffix()}"
+    topic_arn = None
+    queue_url = None
+    try:
+        created_queue = client.post("/api/services/sqs/queues", json={"name": queue_name})
+        assert created_queue.status_code == 201, created_queue.json
+        queue_url = created_queue.json["resource"]["url"]
+        queue_arn = sqs.get_queue_attributes(
+            QueueUrl=queue_url,
+            AttributeNames=["QueueArn"],
+        )["Attributes"]["QueueArn"]
+
+        created_topic = client.post("/api/services/sns/topics", json={"name": topic_name})
+        assert created_topic.status_code == 201, created_topic.json
+        topic_arn = created_topic.json["resource"]["arn"]
+        subscribed = client.post("/api/services/sns/subscribe", json={
+            "topic_arn": topic_arn,
+            "protocol": "sqs",
+            "endpoint": queue_arn,
+        })
+        assert subscribed.status_code == 201, subscribed.json
+
+        message = f"local SNS to SQS integration {uuid.uuid4().hex}"
+        published = client.post("/api/services/sns/publish", json={
+            "topic_arn": topic_arn,
+            "message": message,
+        })
+        assert published.status_code == 201, published.json
+
+        received = sqs.receive_message(
+            QueueUrl=queue_url,
+            MaxNumberOfMessages=1,
+            WaitTimeSeconds=1,
+        ).get("Messages", [])
+        assert received and message in received[0]["Body"]
+        deleted_topic = client.post("/api/services/sns/topics/delete", json={
+            "topic_arn": topic_arn,
+            "name": topic_name,
+            "confirmed": True,
+            "confirm_value": topic_name,
+        })
+        assert deleted_topic.status_code == 200, deleted_topic.json
+        topic_arn = None
+        deleted_queue = client.post("/api/services/sqs/queues/delete", json={
+            "queue_url": queue_url,
+            "name": queue_name,
+            "confirmed": True,
+            "confirm_value": queue_name,
+        })
+        assert deleted_queue.status_code == 200, deleted_queue.json
+        queue_url = None
+    finally:
+        if topic_arn:
+            sns.delete_topic(TopicArn=topic_arn)
+        if queue_url:
+            sqs.delete_queue(QueueUrl=queue_url)
 
 
 def test_api_gateway_dashboard_create_inspect_and_confirmed_delete(app):
@@ -209,9 +297,25 @@ def test_api_gateway_dashboard_create_inspect_and_confirmed_delete(app):
 def test_api_gateway_dashboard_lists_http_apis_and_routes(app):
     client = app.test_client()
     api = _client(app, "apigatewayv2")
+    lmbda = _client(app, "lambda")
     name = f"lc-console-it-http-{_suffix()}"
+    function_name = f"lc-console-it-http-fn-{_suffix()}"
     api_id = None
+    function_created = False
     try:
+        created_function = client.post("/api/services/lambda/functions", json={
+            "name": function_name,
+            "runtime": "python3.12",
+            "handler": "index.handler",
+            "code": (
+                "def handler(event, context):\n"
+                "    return {'statusCode': 200, 'headers': {'content-type': 'application/json'}, "
+                "'body': '{\"message\":\"hello from local Lambda\"}'}\n"
+            ),
+        })
+        assert created_function.status_code == 201, created_function.json
+        function_created = True
+
         created = client.post("/api/services/api_gateway/http", json={"name": name})
         assert created.status_code == 201, created.json
         api_id = created.json["resource"]["id"]
@@ -223,14 +327,32 @@ def test_api_gateway_dashboard_lists_http_apis_and_routes(app):
             for item in listed_apis.json["data"]["http"]["apis"]
         )
 
+        route = client.post("/api/services/api_gateway/http/routes", json={
+            "api_id": api_id,
+            "route_key": "GET /hello",
+            "function_name": function_name,
+        })
+        assert route.status_code == 201, route.json
+
         listed_routes = client.get(f"/api/services/api_gateway/http/{api_id}/routes")
         assert listed_routes.status_code == 200, listed_routes.json
-        assert isinstance(listed_routes.json["routes"], list)
+        assert any(item["key"] == "GET /hello" for item in listed_routes.json["routes"])
+
+        invoked = client.post("/api/services/api_gateway/http/invoke", json={
+            "api_id": api_id,
+            "method": "GET",
+            "path": "/hello",
+        })
+        assert invoked.status_code == 200, invoked.json
+        assert invoked.json["status_code"] == 200
+        assert invoked.json["body"] == {"message": "hello from local Lambda"}
     finally:
         if api_id:
             api.delete_api(ApiId=api_id)
             remaining = api.get_apis(MaxResults="100").get("Items", [])
             assert all(item.get("ApiId") != api_id for item in remaining)
+        if function_created:
+            lmbda.delete_function(FunctionName=function_name)
 
 
 def test_cloudwatch_dashboard_reads_real_log_events_and_cleans_temporary_group(app):
@@ -241,14 +363,20 @@ def test_cloudwatch_dashboard_reads_real_log_events_and_cleans_temporary_group(a
     message = "Floci dashboard CloudWatch integration"
     created = False
     try:
-        logs.create_log_group(logGroupName=group)
+        created_group = client.post("/api/services/cloudwatch/log-groups", json={"group_name": group})
+        assert created_group.status_code == 201, created_group.json
         created = True
-        logs.create_log_stream(logGroupName=group, logStreamName=stream)
-        logs.put_log_events(
-            logGroupName=group,
-            logStreamName=stream,
-            logEvents=[{"timestamp": int(time.time() * 1000), "message": message}],
-        )
+        created_stream = client.post("/api/services/cloudwatch/log-streams", json={
+            "group_name": group,
+            "stream_name": stream,
+        })
+        assert created_stream.status_code == 201, created_stream.json
+        written = client.post("/api/services/cloudwatch/events", json={
+            "group_name": group,
+            "stream_name": stream,
+            "message": message,
+        })
+        assert written.status_code == 201, written.json
         groups = client.get("/api/services/cloudwatch")
         assert groups.status_code == 200
         assert any(item["name"] == group for item in groups.json["data"]["log_groups"]["log_groups"])
@@ -259,7 +387,12 @@ def test_cloudwatch_dashboard_reads_real_log_events_and_cleans_temporary_group(a
         assert any(item["message"] == message for item in events.json["events"])
     finally:
         if created:
-            logs.delete_log_group(logGroupName=group)
+            deleted = client.post("/api/services/cloudwatch/log-groups/delete", json={
+                "group_name": group,
+                "confirmed": True,
+                "confirm_value": group,
+            })
+            assert deleted.status_code == 200, deleted.json
             remaining = logs.describe_log_groups(logGroupNamePrefix=group, limit=50).get("logGroups", [])
             assert all(item.get("logGroupName") != group for item in remaining)
 
@@ -270,7 +403,7 @@ def test_ec2_dashboard_launch_stop_start_and_terminate(app):
     instance_ids = []
     try:
         launched = client.post("/api/services/ec2/instances", json={
-            "image_id": "ami-0abcdef1234567890",
+            "image_id": "ami-0abcdef1234567892",
             "instance_type": "t2.micro",
             "name": f"lc-console-it-ec2-{_suffix()}",
             "count": 1,
@@ -278,6 +411,25 @@ def test_ec2_dashboard_launch_stop_start_and_terminate(app):
         assert launched.status_code == 201, launched.json
         instance_ids = launched.json["resource"]["instance_ids"]
         assert len(instance_ids) == 1
+
+        ec2.get_waiter("instance_running").wait(
+            InstanceIds=instance_ids,
+            WaiterConfig={"Delay": 1, "MaxAttempts": 20},
+        )
+        connection = client.get(f"/api/services/ec2/instances/{instance_ids[0]}/connect")
+        assert connection.status_code == 200, connection.json
+        shell = connection.json["connection"]
+        assert shell["container_name"] == f"floci-aws-ec2-{instance_ids[0]}"
+        assert shell["command"] == f"docker exec -it {shell['container_name']} /bin/sh"
+        result = subprocess.run(
+            ["docker", "exec", shell["container_name"], "/bin/sh", "-lc", "printf LocalCloudShellReady"],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=15,
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "LocalCloudShellReady"
 
         listed = client.get("/api/services/ec2")
         assert listed.status_code == 200
@@ -292,15 +444,17 @@ def test_ec2_dashboard_launch_stop_start_and_terminate(app):
     finally:
         if instance_ids:
             ec2.terminate_instances(InstanceIds=instance_ids)
+            ec2.get_waiter("instance_terminated").wait(
+                InstanceIds=instance_ids,
+                WaiterConfig={"Delay": 1, "MaxAttempts": 20},
+            )
             remaining = {
-                inst["InstanceId"]
+                inst["InstanceId"]: inst["State"]["Name"]
                 for page in ec2.get_paginator("describe_instances").paginate()
                 for reservation in page.get("Reservations", [])
                 for inst in reservation.get("Instances", [])
             }
-            assert all(iid not in remaining for iid in instance_ids)
-
-
+            assert all(remaining.get(iid) == "terminated" for iid in instance_ids)
 def test_lambda_dashboard_create_invoke_and_confirmed_delete(app):
     client = app.test_client()
     lmbda = _client(app, "lambda")

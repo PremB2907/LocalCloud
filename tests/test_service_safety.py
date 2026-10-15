@@ -3,7 +3,7 @@ from botocore.exceptions import ClientError
 
 from app.services.dynamodb import put_test_item
 from app.services.s3 import upload_object
-from app.services.sns import TopicHasSubscriptions, publish_if_unsubscribed
+from app.services.sns import TopicHasSubscriptions, publish_to_local_sqs
 
 
 class ExistingS3Object:
@@ -53,22 +53,39 @@ def test_dynamodb_sample_write_refuses_to_overwrite_existing_key():
 
 
 class SubscribedTopic:
-    def __init__(self):
+    def __init__(self, subscriptions):
         self.publish_called = False
+        self.subscriptions = subscriptions
 
     def get_paginator(self, operation):
         assert operation == "list_subscriptions_by_topic"
         return self
 
     def paginate(self, **kwargs):
-        return [{"Subscriptions": [{"Protocol": "sqs", "Endpoint": "local-only"}]}]
+        return [{"Subscriptions": self.subscriptions}]
 
     def publish(self, **kwargs):
         self.publish_called = True
+        return {"MessageId": "message-1"}
 
 
-def test_sns_publish_refuses_any_subscribed_topic():
-    client = SubscribedTopic()
+def test_sns_publish_refuses_nonlocal_subscription():
+    client = SubscribedTopic([{"Protocol": "email", "Endpoint": "user@example.com"}])
     with pytest.raises(TopicHasSubscriptions):
-        publish_if_unsubscribed(client, "arn:aws:sns:us-east-1:000000000000:topic", "test")
+        publish_to_local_sqs(client, "arn:aws:sns:us-east-1:000000000000:topic", "test", "us-east-1")
     assert client.publish_called is False
+
+
+def test_sns_publish_allows_local_sqs_subscription():
+    client = SubscribedTopic([{
+        "Protocol": "sqs",
+        "Endpoint": "arn:aws:sqs:us-east-1:000000000000:local-queue",
+    }])
+    result = publish_to_local_sqs(
+        client,
+        "arn:aws:sns:us-east-1:000000000000:topic",
+        "test",
+        "us-east-1",
+    )
+    assert result["MessageId"] == "message-1"
+    assert client.publish_called is True

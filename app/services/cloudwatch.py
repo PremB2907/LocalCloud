@@ -1,4 +1,26 @@
+import time
+
 from app.services.common import isoformat
+
+
+def create_log_group(client, group_name):
+    return client.create_log_group(logGroupName=group_name)
+
+
+def create_log_stream(client, group_name, stream_name):
+    return client.create_log_stream(logGroupName=group_name, logStreamName=stream_name)
+
+
+def put_log_event(client, group_name, stream_name, message):
+    return client.put_log_events(
+        logGroupName=group_name,
+        logStreamName=stream_name,
+        logEvents=[{"timestamp": int(time.time() * 1000), "message": message}],
+    )
+
+
+def delete_log_group(client, group_name):
+    return client.delete_log_group(logGroupName=group_name)
 
 
 def list_metrics(client):

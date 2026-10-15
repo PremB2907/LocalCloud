@@ -19,7 +19,8 @@ def test_index_and_catalog_are_available(app):
     assert operations["api_gateway"]["GetApis"] == "passed"
     assert operations["api_gateway"]["GetRoutes"] == "passed"
     assert operations["api_gateway"]["CreateApi"] == "passed"
-    assert operations["api_gateway"]["Invoke"] == "not validated"
+    assert operations["api_gateway"]["CreateRoute"] == "passed"
+    assert operations["api_gateway"]["Invoke"] == "passed"
 
 
 def test_unknown_service_is_not_misreported_as_success(app):
@@ -83,6 +84,88 @@ def test_sns_publish_cannot_target_external_account(app, monkeypatch):
         "message": "test",
     })
     assert response.status_code == 400
+
+
+def test_sqs_queue_delete_requires_session_ownership_and_exact_confirmation(app, monkeypatch):
+    queue_url = "http://localhost:4566/000000000000/demo-queue"
+    called = []
+
+    class FakeSqsClient:
+        def delete_queue(self, **kwargs):
+            called.append(kwargs)
+            return {"ResponseMetadata": {"HTTPStatusCode": 200}}
+
+    monkeypatch.setattr("app.routes._client", lambda _name: FakeSqsClient())
+    client = app.test_client()
+    denied = client.post("/api/services/sqs/queues/delete", json={
+        "queue_url": queue_url,
+        "name": "demo-queue",
+        "confirmed": True,
+        "confirm_value": "demo-queue",
+    })
+    assert denied.status_code == 403
+    assert called == []
+
+    app.extensions["console_created_queues"].add(queue_url)
+    unconfirmed = client.post("/api/services/sqs/queues/delete", json={
+        "queue_url": queue_url,
+        "name": "demo-queue",
+        "confirmed": True,
+        "confirm_value": "not-the-queue",
+    })
+    assert unconfirmed.status_code == 400
+    assert called == []
+
+    deleted = client.post("/api/services/sqs/queues/delete", json={
+        "queue_url": queue_url,
+        "name": "demo-queue",
+        "confirmed": True,
+        "confirm_value": "demo-queue",
+    })
+    assert deleted.status_code == 200
+    assert called == [{"QueueUrl": queue_url}]
+    assert queue_url not in app.extensions["console_created_queues"]
+
+
+def test_sns_topic_delete_requires_session_ownership_and_exact_confirmation(app, monkeypatch):
+    topic_arn = "arn:aws:sns:us-east-1:000000000000:demo-topic"
+    called = []
+
+    class FakeSnsClient:
+        def delete_topic(self, **kwargs):
+            called.append(kwargs)
+            return {"ResponseMetadata": {"HTTPStatusCode": 200}}
+
+    monkeypatch.setattr("app.routes._client", lambda _name: FakeSnsClient())
+    client = app.test_client()
+    denied = client.post("/api/services/sns/topics/delete", json={
+        "topic_arn": topic_arn,
+        "name": "demo-topic",
+        "confirmed": True,
+        "confirm_value": "demo-topic",
+    })
+    assert denied.status_code == 403
+    assert called == []
+
+    app.extensions["console_created_topics"].add(topic_arn)
+    unconfirmed = client.post("/api/services/sns/topics/delete", json={
+        "topic_arn": topic_arn,
+        "name": "demo-topic",
+        "confirmed": True,
+        "confirm_value": "wrong-topic",
+    })
+    assert unconfirmed.status_code == 400
+    assert called == []
+
+    deleted = client.post("/api/services/sns/topics/delete", json={
+        "topic_arn": topic_arn,
+        "name": "demo-topic",
+        "confirmed": True,
+        "confirm_value": "demo-topic",
+    })
+    assert deleted.status_code == 200
+    assert called == [{"TopicArn": topic_arn}]
+    assert topic_arn not in app.extensions["console_created_topics"]
 
 
 def test_dynamodb_item_write_is_limited_to_console_created_tables(app, monkeypatch):
@@ -164,6 +247,77 @@ def test_sns_blocked_publish_is_recorded_in_operations_log(app, monkeypatch):
     assert ops[0]["result"] == "Blocked"
 
 
+def test_cloudwatch_dashboard_can_create_write_inspect_and_delete_owned_log_group(app, monkeypatch):
+    class FakeLogsClient:
+        def __init__(self):
+            self.events = []
+            self.deleted = []
+
+        def create_log_group(self, **kwargs):
+            assert kwargs == {"logGroupName": "/localcloud/test"}
+            return {"ResponseMetadata": {"HTTPStatusCode": 200}}
+
+        def create_log_stream(self, **kwargs):
+            assert kwargs == {
+                "logGroupName": "/localcloud/test",
+                "logStreamName": "console",
+            }
+            return {"ResponseMetadata": {"HTTPStatusCode": 200}}
+
+        def put_log_events(self, **kwargs):
+            self.events.extend(kwargs["logEvents"])
+            assert kwargs["logGroupName"] == "/localcloud/test"
+            assert kwargs["logStreamName"] == "console"
+            return {"ResponseMetadata": {"HTTPStatusCode": 200}}
+
+        def delete_log_group(self, **kwargs):
+            self.deleted.append(kwargs["logGroupName"])
+            return {"ResponseMetadata": {"HTTPStatusCode": 200}}
+
+    logs = FakeLogsClient()
+    monkeypatch.setattr("app.routes._client", lambda _name: logs)
+    client = app.test_client()
+
+    created = client.post("/api/services/cloudwatch/log-groups", json={"group_name": "/localcloud/test"})
+    assert created.status_code == 201
+    assert "/localcloud/test" in app.extensions["console_created_log_groups"]
+
+    stream = client.post("/api/services/cloudwatch/log-streams", json={
+        "group_name": "/localcloud/test",
+        "stream_name": "console",
+    })
+    assert stream.status_code == 201
+
+    written = client.post("/api/services/cloudwatch/events", json={
+        "group_name": "/localcloud/test",
+        "stream_name": "console",
+        "message": "hello from dashboard",
+    })
+    assert written.status_code == 201
+    assert logs.events[0]["message"] == "hello from dashboard"
+    assert isinstance(logs.events[0]["timestamp"], int)
+
+    deleted = client.post("/api/services/cloudwatch/log-groups/delete", json={
+        "group_name": "/localcloud/test",
+        "confirmed": True,
+        "confirm_value": "/localcloud/test",
+    })
+    assert deleted.status_code == 200
+    assert logs.deleted == ["/localcloud/test"]
+    assert "/localcloud/test" not in app.extensions["console_created_log_groups"]
+
+
+def test_cloudwatch_writes_are_limited_to_session_owned_log_groups(app, monkeypatch):
+    monkeypatch.setattr("app.routes._client", lambda _name: (_ for _ in ()).throw(AssertionError("write should not run")))
+    response = app.test_client().post("/api/services/cloudwatch/events", json={
+        "group_name": "/existing/user-group",
+        "stream_name": "stream",
+        "message": "must not be written",
+    })
+    assert response.status_code == 403
+    assert response.json["error"]["code"] == "LogGroupNotOwnedByConsole"
+
+
 # ---------------------------------------------------------------------------
 # EC2 lifecycle route safety
 # ---------------------------------------------------------------------------
@@ -194,6 +348,12 @@ def test_ec2_run_instances_records_created_instances(app, monkeypatch):
         def run_instances(self, **kwargs):
             assert kwargs["ImageId"] == "ami-0abcdef1234567890"
             assert kwargs["InstanceType"] == "t2.micro"
+            assert kwargs == {
+                "ImageId": "ami-0abcdef1234567890",
+                "InstanceType": "t2.micro",
+                "MinCount": 2,
+                "MaxCount": 2,
+            }
             return {"Instances": [{"InstanceId": "i-abc123"}, {"InstanceId": "i-def456"}]}
         def create_tags(self, **kwargs):
             assert kwargs["Resources"] == ["i-abc123", "i-def456"]
@@ -209,6 +369,28 @@ def test_ec2_run_instances_records_created_instances(app, monkeypatch):
     assert response.json["resource"]["count"] == 2
     assert "i-abc123" in app.extensions["console_created_instances"]
     assert "i-def456" in app.extensions["console_created_instances"]
+
+
+def test_ec2_connection_route_rejects_malformed_instance_id(app, monkeypatch):
+    monkeypatch.setattr("app.routes._client", lambda _name: (_ for _ in ()).throw(AssertionError("client should not be called")))
+    response = app.test_client().get("/api/services/ec2/instances/not-an-instance/connect")
+    assert response.status_code == 400
+
+
+def test_ec2_connection_route_returns_local_container_shell(app, monkeypatch):
+    monkeypatch.setattr(
+        "app.routes.ec2.instance_shell",
+        lambda _client, instance_id: {
+            "instance_id": instance_id,
+            "container_name": "floci-aws-ec2-i-abc123",
+            "command": "docker exec -it floci-aws-ec2-i-abc123 /bin/sh",
+            "note": "Local container shell",
+        },
+    )
+    response = app.test_client().get("/api/services/ec2/instances/i-abc123/connect")
+    assert response.status_code == 200
+    assert response.json["connection"]["container_name"] == "floci-aws-ec2-i-abc123"
+    assert response.json["connection"]["command"] == "docker exec -it floci-aws-ec2-i-abc123 /bin/sh"
 
 
 def test_ec2_lifecycle_requires_instance_ids(app, monkeypatch):
