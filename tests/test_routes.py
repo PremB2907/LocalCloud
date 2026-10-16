@@ -17,7 +17,7 @@ def test_index_and_catalog_are_available(app):
     }
     assert operations["sns"]["Subscribe"] == "passed"
     assert any(
-        "does not send confirmation emails" in limitation
+        "never sends real email" in limitation
         for limitation in response.json["sns"]["limitations"]
     )
     assert operations["api_gateway"]["GetApis"] == "passed"
