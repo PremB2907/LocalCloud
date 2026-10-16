@@ -127,8 +127,21 @@ def terminate_instances(client, instance_ids):
 
 
 def reboot_instances(client, instance_ids):
+    """Reboot instances and report the actual resulting state."""
+    before = {}
+    for instance_id in instance_ids:
+        instance = describe_instance(client, instance_id)
+        before[instance_id] = instance["state"]
     client.reboot_instances(InstanceIds=instance_ids)
-    return [{"id": iid, "previous_state": "running", "current_state": "running"} for iid in instance_ids]
+    changes = []
+    for instance_id in instance_ids:
+        instance = describe_instance(client, instance_id)
+        changes.append({
+            "id": instance_id,
+            "previous_state": before[instance_id],
+            "current_state": instance["state"],
+        })
+    return changes
 
 
 def list_key_pairs(client):

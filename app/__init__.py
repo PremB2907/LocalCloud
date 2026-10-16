@@ -36,5 +36,6 @@ def create_app(test_config=None):
     app.extensions["console_created_topics"] = set()
     app.extensions["console_created_key_pairs"] = set()
     app.extensions["received_messages"] = {}
+    app.extensions["console_email_subscriptions"] = {}
     app.register_blueprint(console)
     return app

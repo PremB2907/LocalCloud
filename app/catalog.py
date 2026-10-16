@@ -51,16 +51,21 @@ SERVICE_CATALOG = {
         "name": "Amazon SNS",
         "group": "Messaging",
         "docs": "https://github.com/floci-io/floci/blob/2.2.0/docs/services/sns.md",
-        "description": "Create local topics and record subscriptions; message delivery is supported only to local SQS queues.",
+        "description": "Create local topics and record subscriptions. LocalCloud delivers email subscriptions through a configurable SMTP relay.",
         "operations": [
             {"name": "ListTopics", "validation": "passed"},
             {"name": "CreateTopic", "validation": "passed"},
             {"name": "Publish (local SQS)", "validation": "passed"},
+            {"name": "Publish (LocalCloud email)", "validation": "not validated"},
             {"name": "ListSubscriptionsByTopic", "validation": "passed"},
             {"name": "Subscribe", "validation": "passed"},
             {"name": "DeleteTopic", "validation": "passed"},
         ],
-        "limitations": ["Floci records email subscriptions but does not send confirmation emails or deliver messages to email endpoints. Publishing is allowed only when every subscription targets an SQS queue in this local Floci account and region. HTTP, Lambda, and other endpoints are not delivered. Only standard (non-FIFO) topics are exposed."],
+        "limitations": [
+            "The Floci emulator records subscriptions but never sends real email, so LocalCloud owns email delivery. Email delivery requires SMTP settings in the environment and is tested with a mocked SMTP transport only.",
+            "Publishing is allowed only when every non-email subscription targets a local SQS queue in this local Floci account and region. HTTP, Lambda, and other endpoints are not delivered.",
+            "Only standard (non-FIFO) topics are exposed.",
+        ],
     },
     "lambda": {
         "name": "AWS Lambda",

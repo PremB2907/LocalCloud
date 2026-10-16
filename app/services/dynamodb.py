@@ -117,7 +117,7 @@ def scan_items(client, table_name, next_token=None, limit=100):
     options = {"TableName": table_name, "Limit": limit}
     if next_token:
         try:
-            decoded = base64.urlsafe_b64decode(next_token.encode("ascii"))
+            decoded = base64.urlsafe_b64decode(next_token.encode("ascii"), validate=True)
             options["ExclusiveStartKey"] = json.loads(decoded)
         except (ValueError, UnicodeError, json.JSONDecodeError) as error:
             raise ValueError("The DynamoDB scan cursor is invalid.") from error

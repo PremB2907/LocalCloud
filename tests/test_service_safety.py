@@ -69,8 +69,20 @@ class SubscribedTopic:
         return {"MessageId": "message-1"}
 
 
-def test_sns_publish_refuses_nonlocal_subscription():
+def test_sns_publish_skips_localcloud_email_subscription():
     client = SubscribedTopic([{"Protocol": "email", "Endpoint": "user@example.com"}])
+    result = publish_to_local_sqs(
+        client,
+        "arn:aws:sns:us-east-1:000000000000:topic",
+        "test",
+        "us-east-1",
+    )
+    assert result["MessageId"] == "message-1"
+    assert client.publish_called is True
+
+
+def test_sns_publish_refuses_unsupported_nonlocal_subscription():
+    client = SubscribedTopic([{"Protocol": "http", "Endpoint": "https://example.com/hook"}])
     with pytest.raises(TopicHasSubscriptions):
         publish_to_local_sqs(client, "arn:aws:sns:us-east-1:000000000000:topic", "test", "us-east-1")
     assert client.publish_called is False

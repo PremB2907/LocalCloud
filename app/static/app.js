@@ -297,6 +297,71 @@ function buildTablePanel(title, rows, columns, error = null) {
 }
 
 /* =============================================================
+   SEARCH / FILTER
+   ============================================================= */
+
+let filterInput = null;
+
+/**
+ * Apply the client-side filter to every table row currently rendered.
+ * Only rows inside a `.table-scroll` container are filtered, so panels that
+ * show summaries, action buttons, or details are never hidden.
+ */
+function applyListingFilter() {
+  const content = document.getElementById("page-content");
+  if (!content) return;
+  const query = (filterInput && filterInput.value ? filterInput.value : "").trim().toLowerCase();
+  content.querySelectorAll("tbody tr").forEach((row) => {
+    const insideScroll = row.closest(".table-scroll") !== null;
+    const text = (row.textContent || "").toLowerCase();
+    const hidden = insideScroll && query.length > 0 && !text.includes(query);
+    row.classList.toggle("is-filtered-out", hidden);
+    row.hidden = hidden;
+  });
+  let empty = content.querySelector(".list-filter-empty");
+  if (empty) empty.remove();
+  if (query.length > 0) {
+    const visible = content.querySelectorAll("tbody tr:not([hidden])");
+    if (visible.length === 0) {
+      empty = el("div", { class: "list-filter-empty empty-state", role: "status", "aria-live": "polite" },
+        svgIcon("icon-search", ""),
+        el("strong", {}, "No matching resources"),
+        el("span", {}, "Adjust the filter to narrow this listing.")
+      );
+      content.appendChild(empty);
+    }
+  }
+}
+
+/**
+ * Render a search field above the first listing and wire it to the current
+ * page. Re-invoked after every render so the field always reflects the
+ * current page.
+ */
+function renderListingFilter() {
+  const content = document.getElementById("page-content");
+  if (!content) return;
+  let field = content.querySelector(".service-search-field");
+  if (field) field.remove();
+  const input = el("input", {
+    class: "service-search-input",
+    type: "search",
+    "aria-label": "Filter the displayed resources",
+    placeholder: "Filter displayed resources…",
+    autocomplete: "off",
+    spellcheck: false,
+  });
+  field = el("div", { class: "service-search-field", role: "search" },
+    el("label", { for: "service-search-input" }, "Filter"),
+    input
+  );
+  content.insertBefore(field, content.firstChild);
+  filterInput = input;
+  input.addEventListener("input", applyListingFilter);
+  applyListingFilter();
+}
+
+/* =============================================================
    CONNECTION / HEALTH
    ============================================================= */
 
@@ -305,7 +370,7 @@ function updateConnection(health) {
   if (health.connected) {
     connPill.classList.add("is-connected");
     connText.textContent = `Floci ${health.version || "connected"}`;
-    sidebarVer.textContent = `Floci ${health.version || ""}`;
+    sidebarVer.textContent = `Floci ${health.version || ""} · ${health.region || "local"}`;
   } else {
     connPill.classList.add("is-disconnected");
     connText.textContent = "Disconnected";
@@ -493,6 +558,8 @@ async function renderOverview() {
     );
   }
   pageContent.appendChild(opsPanel);
+
+  renderListingFilter();
 }
 
 /* =============================================================
@@ -939,6 +1006,8 @@ function renderService(key, response) {
   // Detail pane anchor
   const detailPane = el("div", { id: "detail-pane" });
   pageContent.appendChild(detailPane);
+
+  renderListingFilter();
 }
 
 async function renderServicePage(key) {

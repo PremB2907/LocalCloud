@@ -1560,6 +1560,51 @@ html[data-theme="dark"] .toast-message.is-error { background: #5a1111; }
 }
 
 /* ============================================================
+   SERVICE SEARCH / FILTER
+   ============================================================ */
+
+.service-search-field {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  margin: var(--s4) 0 0;
+  padding: 0 var(--s4);
+  border-bottom: 1px solid var(--border);
+}
+.service-search-field label {
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.service-search-input {
+  flex: 1;
+  min-width: 0;
+  max-width: 520px;
+  margin: var(--s3) 0;
+  padding: var(--s2) var(--s3);
+  border: 1px solid var(--border-input);
+  border-radius: var(--r-md);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-size: var(--font-size-sm);
+}
+.service-search-input:focus {
+  outline: none;
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.18);
+}
+
+tbody tr.is-filtered-out,
+tbody tr[hidden] {
+  display: none;
+}
+
+.list-filter-empty {
+  margin: var(--s4) 0;
+}
+
+/* ============================================================
    REDUCED MOTION
    ============================================================ */
 

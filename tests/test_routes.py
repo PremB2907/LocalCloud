@@ -663,8 +663,27 @@ def test_ec2_run_instances_rejects_invalid_key_name(app, monkeypatch):
     assert response.status_code == 400
 
 
-def test_ec2_reboot_calls_reboot_instances(app, monkeypatch):
+def test_ec2_reboot_reports_actual_state_after_reboot(app, monkeypatch):
     class FakeEc2Client:
+        def describe_instances(self, InstanceIds=None):
+            instance_ids = InstanceIds or []
+            instances = []
+            for instance_id in instance_ids:
+                state = "running" if instance_id.endswith("1") else "stopped"
+                instances.append({
+                    "InstanceId": instance_id,
+                    "State": {"Name": state},
+                    "ImageId": "ami-ubuntu2204",
+                    "InstanceType": "t2.micro",
+                    "LaunchTime": None,
+                    "PrivateIpAddress": None,
+                    "KeyName": None,
+                })
+            return {"Reservations": [{"Instances": instances}]}
+
+        def describe_instance(self, instance_id):
+            return self.describe_instances([instance_id])["Reservations"][0]["Instances"][0]
+
         def reboot_instances(self, **kwargs):
             assert kwargs["InstanceIds"] == ["i-0abcdef1234567890"]
             return {"ResponseMetadata": {"HTTPStatusCode": 200}}
@@ -674,6 +693,7 @@ def test_ec2_reboot_calls_reboot_instances(app, monkeypatch):
         "instance_ids": ["i-0abcdef1234567890"],
     })
     assert response.status_code == 200, response.json
+    assert response.json["changes"][0]["current_state"] == "stopped"
 
 
 def test_ec2_connect_rejects_invalid_instance_id(app, monkeypatch):

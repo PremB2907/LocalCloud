@@ -15,7 +15,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 from flask import Blueprint, current_app, jsonify, render_template, request, send_file
 
 from app import catalog
-from app.services import api_gateway, cloudwatch, dynamodb, ec2, lambda_functions, s3, sns, sqs, ssm
+from app.services import api_gateway, cloudwatch, dynamodb, ec2, lambda_functions, s3, sns, sqs, ssm, smtp
 
 
 console = Blueprint("console", __name__)
@@ -104,6 +104,76 @@ def _safe_topic_arn(topic_arn):
         )
     except (AttributeError, ValueError):
         return False
+
+
+def _local_email_subscriptions():
+    return list(current_app.extensions["console_email_subscriptions"].values())
+
+
+def _email_delivery_subscriptions(topic_arn):
+    return [
+        subscription
+        for subscription in _local_email_subscriptions()
+        if subscription.get("topic_arn") == topic_arn
+    ]
+
+
+def _register_email_subscription(topic_arn, protocol, endpoint, subscription_arn):
+    """Record a LocalCloud-owned email subscription and its delivery readiness."""
+    status = "configured" if smtp.is_configured() else "smtp_not_configured"
+    current_app.extensions["console_email_subscriptions"][subscription_arn] = {
+        "topic_arn": topic_arn,
+        "protocol": protocol,
+        "endpoint": endpoint,
+        "subscription_arn": subscription_arn,
+        "status": status,
+        "attempts": 0,
+        "last_delivery": None,
+        "last_detail": None,
+    }
+    return subscription_arn
+
+
+def _deliver_local_emails(topic_arn, subject, body):
+    """Attempt delivery to every LocalCloud email subscription of a topic."""
+    for subscription in _email_delivery_subscriptions(topic_arn):
+        record = current_app.extensions["console_email_subscriptions"][
+            subscription.get("subscription_arn", "")
+        ]
+        record["status"] = "configured" if smtp.is_configured() else "smtp_not_configured"
+    delivered = []
+    failed = []
+    for subscription in _email_delivery_subscriptions(topic_arn):
+        record = current_app.extensions["console_email_subscriptions"][
+            subscription.get("subscription_arn", "")
+        ]
+        attempts = record.get("attempts", 0) + 1
+        result = smtp.send_email(
+            subscription["endpoint"],
+            subject,
+            body,
+        )
+        record["attempts"] = attempts
+        if result.ok:
+            record["status"] = "delivered"
+            record["last_delivery"] = datetime.now().astimezone().isoformat(timespec="seconds")
+            record["last_detail"] = None
+            delivered.append({
+                "endpoint": subscription["endpoint"],
+                "ok": True,
+                "status_code": result.status_code,
+            })
+        else:
+            record["status"] = "failed"
+            record["last_delivery"] = datetime.now().astimezone().isoformat(timespec="seconds")
+            record["last_detail"] = result.detail
+            failed.append({
+                "endpoint": subscription["endpoint"],
+                "ok": False,
+                "status_code": result.status_code,
+                "detail": result.detail,
+            })
+    return {"delivered": delivered, "failed": failed}
 
 
 def _operation_error(error):
@@ -214,6 +284,7 @@ def health():
                 "connected": True,
                 "version": payload.get("version"),
                 "endpoint": config.endpoint_url,
+                "region": config.region,
                 "http_status": response.status,
             })
     except (OSError, URLError, TimeoutError, ValueError):
@@ -772,10 +843,16 @@ def post_sns_publish():
     if not _safe_topic_arn(topic_arn) or not isinstance(message, str) or not message or len(message.encode("utf-8")) > 262144:
         return jsonify({"ok": False, "error": {"code": "ValidationError", "message": "Choose a local topic and a non-empty message under 256 KiB."}}), 400
     try:
-        region = current_app.extensions["floci_config"].region
-        response = sns.publish_to_local_sqs(_client("sns"), topic_arn, message, region)
+        response = sns.publish_to_local_sqs(_client("sns"), topic_arn, message, current_app.extensions["floci_config"].region)
+        message_id = response.get("MessageId")
+        deliveries = _deliver_local_emails(topic_arn, "LocalCloud SNS notification", message)
         _record_operation("Publish", topic_arn.rsplit(":", 1)[-1], "Succeeded")
-        return jsonify({"ok": True, "message_id": response.get("MessageId"), "http_status": response["ResponseMetadata"]["HTTPStatusCode"]}), 201
+        return jsonify({
+            "ok": True,
+            "message_id": message_id,
+            "deliveries": deliveries,
+            "http_status": response["ResponseMetadata"]["HTTPStatusCode"],
+        }), 201
     except sns.TopicHasSubscriptions as error:
         _record_operation("Publish", topic_arn.rsplit(":", 1)[-1], "Blocked")
         return _operation_error(ValueError(str(error)))
@@ -791,10 +868,41 @@ def get_sns_subscriptions():
         return jsonify({"ok": False, "error": {"code": "ValidationError", "message": "A local SNS topic ARN is required."}}), 400
     try:
         response = _client("sns").list_subscriptions_by_topic(TopicArn=topic_arn)
-        return jsonify({"ok": True, "subscriptions": response.get("Subscriptions", [])})
+        subscriptions = list(response.get("Subscriptions", []))
+        for subscription in _local_email_subscriptions():
+            if subscription.get("topic_arn") != topic_arn:
+                continue
+            subscriptions.append({
+                "protocol": subscription["protocol"],
+                "endpoint": subscription["endpoint"],
+                "subscription_arn": subscription.get("subscription_arn"),
+                "delivery_status": subscription.get("status"),
+                "delivery_attempts": subscription.get("attempts", 0),
+                "delivery_last_detail": subscription.get("last_detail"),
+                "localcloud_managed": True,
+            })
+        return jsonify({"ok": True, "subscriptions": subscriptions})
     except (ClientError, BotoCoreError) as error:
         detail, status = _safe_error(error)
         return jsonify({"ok": False, "error": detail}), status
+
+
+@console.get("/api/services/sns/deliveries")
+def get_sns_deliveries():
+    """Report LocalCloud email delivery history for one topic."""
+    topic_arn = request.args.get("topic_arn", "")
+    if not _safe_topic_arn(topic_arn):
+        return jsonify({"ok": False, "error": {"code": "ValidationError", "message": "A local SNS topic ARN is required."}}), 400
+    deliveries = []
+    for subscription in _email_delivery_subscriptions(topic_arn):
+        deliveries.append({
+            "endpoint": subscription["endpoint"],
+            "status": subscription.get("status"),
+            "attempts": subscription.get("attempts", 0),
+            "last_delivery": subscription.get("last_delivery"),
+            "last_detail": subscription.get("last_detail"),
+        })
+    return jsonify({"ok": True, "deliveries": deliveries})
 
 
 SUBSCRIBE_PROTOCOLS = {"email", "email-json", "sms", "http", "https", "sqs", "lambda", "application"}
@@ -814,6 +922,11 @@ def post_sns_subscribe():
         return jsonify({"ok": False, "error": {"code": "ValidationError", "message": "A subscription endpoint is required."}}), 400
     try:
         response = sns.subscribe(_client("sns"), topic_arn, protocol, endpoint.strip())
+        subscription_arn = response.get("SubscriptionArn")
+        if protocol in sns.LOCAL_CLOUD_PROTOCOLS:
+            _register_email_subscription(
+                topic_arn, protocol, endpoint.strip(), subscription_arn or f"{topic_arn}:{protocol}"
+            )
         _record_operation("Subscribe", topic_arn.rsplit(":", 1)[-1], "Succeeded")
         return jsonify({
             "ok": True,

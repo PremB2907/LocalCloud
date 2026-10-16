@@ -79,4 +79,22 @@ All browser-created resources were cleaned up after verification, and the tempor
 
 ## Remaining Gaps
 
-EC2 is container-backed rather than a full virtual machine, and SSH key injection failed on this Docker Desktop setup; use the dashboard's local Docker shell command instead. CloudWatch metric statistics were not tested because no metrics existed. API Gateway REST deployment remains unvalidated. IAM enforcement, S3 virtual-hosted addressing, DynamoDB composite keys, SQS FIFO, SNS email/HTTP/Lambda delivery, pagination with large inventories, and full service parity were not tested.
+EC2 is container-backed rather than a full virtual machine, and SSH key injection failed on this Docker Desktop setup; use the dashboard's local Docker shell command instead. CloudWatch metric statistics were not tested because no metrics existed. API Gateway REST deployment remains unvalidated. IAM enforcement, S3 virtual-hosted addressing, DynamoDB composite keys, SQS FIFO, pagination with large inventories, and full service parity were not tested. SNS email delivery is implemented locally, but real delivery to an external mailbox has not been verified (see the current-state section above).
+
+---
+
+## Current state: LocalCloud-owned email delivery and console refinements (2026-10-16)
+
+This section records work performed after the historical runs above. Floci itself was **not** running during this verification window, so live Floci integration tests were skipped; all checks below were executed against the workspace tree.
+
+- **Automated tests:** `63 passed, 13 skipped` (13 skipped require `RUN_FLOCI_INTEGRATION=1` and a live Floci endpoint). New tests in `tests/test_sns_email.py` cover the SMTP adapter, the email subscription status, successful delivery, and the not-configured failure path. All SMTP tests use a mocked SMTP transport; no real email was sent.
+- **Backend changes:**
+  - `app/services/smtp.py` (new): configurable SMTP adapter driven by environment variables (`SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM_EMAIL`, `SMTP_USE_TLS`). Credentials are never logged or exposed. Delivery failures return a clear, sanitized message.
+  - SNS email subscriptions are owned by LocalCloud. Publishing no longer blocks when a topic has email subscriptions; those are delivered locally and any failure is reported. Publishing is still blocked for HTTP, HTTPS, Lambda, and other non-SQS, non-email subscriptions.
+  - New endpoints: `GET /api/services/sns/deliveries` reports per-subscription delivery status and the last failure reason.
+  - EC2 `RebootInstances` now reports the actual state read back after reboot instead of assuming `running`.
+  - DynamoDB scan cursors are decoded with strict base64 validation.
+- **Frontend changes:**
+  - Every service listing now has a client-side filter box; table rows outside a `.table-scroll` container are never hidden.
+  - The sidebar footer shows the configured region next to the Floci version.
+- **Not verified here:** real email delivery to an external mailbox (requires configured SMTP credentials and an explicit manual run), live Floci integration, and browser automation (the workspace `.venv` does not include a browser driver; Firefox and geckodriver are installed system-wide but were not used for this run).
