@@ -521,6 +521,86 @@ def test_cloudwatch_ec2_instance_monitoring(app):
             assert all(remaining.get(iid) == "terminated" for iid in instance_ids)
 
 
+def test_cloudwatch_ec2_metrics_collector(app):
+    """End-to-end test of the EC2 metrics collector: start collector,
+    verify it publishes container metrics for a running instance, then stop."""
+    client = app.test_client()
+    ec2 = _client(app, "ec2")
+    instance_ids = []
+    try:
+        launched = client.post("/api/services/ec2/instances", json={
+            "image_id": "ami-ubuntu2204",
+            "instance_type": "t2.micro",
+            "name": f"lc-console-it-cw-collector-{_suffix()}",
+            "count": 1,
+        })
+        assert launched.status_code == 201, launched.json
+        instance_ids = launched.json["resource"]["instance_ids"]
+        assert len(instance_ids) == 1
+        ec2.get_waiter("instance_running").wait(
+            InstanceIds=instance_ids,
+            WaiterConfig={"Delay": 1, "MaxAttempts": 20},
+        )
+
+        # Start the collector with a short interval for fast testing.
+        started = client.post("/api/services/ec2/metrics/collector/start", json={
+            "interval_seconds": 5,
+            "max_instances": 10,
+        })
+        assert started.status_code == 200, started.json
+        assert started.json["collector"]["enabled"] is True
+
+        # Wait for at least one collection cycle.
+        import time
+        deadline = time.time() + 30
+        collected = False
+        while time.time() < deadline:
+            status = client.get("/api/services/ec2/metrics/collector/status")
+            assert status.status_code == 200, status.json
+            if status.json["collector"]["collections"] >= 1:
+                collected = True
+                break
+            time.sleep(1)
+        assert collected, "collector did not complete a collection cycle"
+
+        # Verify the metric appears in ListMetrics.
+        listed = client.get("/api/services/cloudwatch")
+        assert listed.status_code == 200
+        metrics = listed.json["data"]["metrics"]["metrics"]
+        assert any(
+            m.get("namespace") == "LocalCloud/EC2"
+            and m.get("name") == "CpuUtilization"
+            and any(d.get("Name") == "InstanceId" and d.get("Value") == instance_ids[0]
+                    for d in m.get("dimensions", []))
+            for m in metrics
+        ), metrics
+
+        # Read the datapoints back through GetMetricStatistics.
+        stats = client.get("/api/services/cloudwatch/metric-statistics", query_string={
+            "namespace": "LocalCloud/EC2",
+            "metric_name": "CpuUtilization",
+            "dimensions": '[{"name": "InstanceId", "value": "' + instance_ids[0] + '"}]',
+            "period": "60",
+            "statistic": "Average",
+        })
+        assert stats.status_code == 200, stats.json
+        assert stats.json["ok"] is True
+        datapoints = stats.json["datapoints"]
+        assert len(datapoints) >= 1, datapoints
+
+        # Stop the collector.
+        stopped = client.post("/api/services/ec2/metrics/collector/stop")
+        assert stopped.status_code == 200, stopped.json
+        assert stopped.json["collector"]["enabled"] is False
+    finally:
+        if instance_ids:
+            ec2.terminate_instances(InstanceIds=instance_ids)
+            ec2.get_waiter("instance_terminated").wait(
+                InstanceIds=instance_ids,
+                WaiterConfig={"Delay": 1, "MaxAttempts": 20},
+            )
+
+
 def test_ec2_dashboard_launch_stop_start_and_terminate(app):
     client = app.test_client()
     ec2 = _client(app, "ec2")

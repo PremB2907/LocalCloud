@@ -4,6 +4,7 @@ import os
 from app.clients import ClientProvider
 from app.config import AppConfig
 from app.routes import console
+from app.services.ec2_metrics_collector import Ec2MetricsCollector
 
 
 def _load_dotenv(path=".env"):
@@ -58,6 +59,11 @@ def create_app(test_config=None):
     )
     app.extensions["floci_config"] = config
     app.extensions["aws_clients"] = ClientProvider(config)
+    app.extensions["ec2_metrics_collector"] = Ec2MetricsCollector(
+        get_ec2_client=lambda: app.extensions["aws_clients"].get("ec2"),
+        interval_seconds=int(os.environ.get("LC_EC2_METRICS_INTERVAL", "60")),
+        max_instances=int(os.environ.get("LC_EC2_METRICS_MAX_INSTANCES", "10")),
+    )
     app.extensions["recent_operations"] = []
     app.extensions["console_created_buckets"] = set()
     app.extensions["console_created_tables"] = set()

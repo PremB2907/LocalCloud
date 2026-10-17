@@ -1372,6 +1372,52 @@ def post_ec2_key_pair_delete():
         return _operation_error(error)
 
 
+@console.get("/api/services/ec2/metrics/collector/status")
+def get_ec2_metrics_collector_status():
+    """Report the EC2 metrics collector status and configuration."""
+    collector = current_app.extensions["ec2_metrics_collector"]
+    return jsonify({"ok": True, "collector": collector.status()})
+
+
+@console.post("/api/services/ec2/metrics/collector/start")
+def post_ec2_metrics_collector_start():
+    """Start the EC2 metrics collector background thread.
+
+    Requires host Docker access (``docker stats``). Without it the collector
+    runs but reports that the Docker CLI is unavailable.
+    """
+    payload = _body() or {}
+    interval = payload.get("interval_seconds")
+    max_instances = payload.get("max_instances")
+    collector = current_app.extensions["ec2_metrics_collector"]
+    if interval is not None:
+        try:
+            interval = int(interval)
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": {"code": "ValidationError", "message": "interval_seconds must be an integer >= 10."}}), 400
+        if interval < 10:
+            return jsonify({"ok": False, "error": {"code": "ValidationError", "message": "interval_seconds must be an integer >= 10."}}), 400
+        collector.interval_seconds = interval
+    if max_instances is not None:
+        try:
+            max_instances = int(max_instances)
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": {"code": "ValidationError", "message": "max_instances must be a positive integer."}}), 400
+        if max_instances < 1:
+            return jsonify({"ok": False, "error": {"code": "ValidationError", "message": "max_instances must be a positive integer."}}), 400
+        collector.max_instances = max_instances
+    collector.start()
+    return jsonify({"ok": True, "collector": collector.status()})
+
+
+@console.post("/api/services/ec2/metrics/collector/stop")
+def post_ec2_metrics_collector_stop():
+    """Stop the EC2 metrics collector background thread."""
+    collector = current_app.extensions["ec2_metrics_collector"]
+    collector.stop()
+    return jsonify({"ok": True, "collector": collector.status()})
+
+
 # ---------------------------------------------------------------------------
 # Lambda — create / invoke / delete
 # ---------------------------------------------------------------------------

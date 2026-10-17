@@ -545,6 +545,47 @@ async function fetchMetricStatistics(state) {
   renderMetricGraphOutput(output, result.datapoints || [], state.statistic || "Average", state.unit || "");
 }
 
+/**
+ * Fetch the EC2 metrics collector status and render it into the status div.
+ */
+async function fetchEc2MetricsStatus() {
+  const output = document.getElementById("ec2-metrics-status");
+  if (!output) return;
+  try {
+    const result = await requestJson("/api/services/ec2/metrics/collector/status");
+    if (!result.ok) {
+      output.innerHTML = `<div class="error-band">Failed to load collector status.</div>`;
+      return;
+    }
+    const c = result.collector;
+    const runningBadge = c.running
+      ? `<span class="badge badge-success">● running</span>`
+      : `<span class="badge badge-danger">● stopped</span>`;
+    const errorHtml = c.last_error
+      ? `<div class="error-band">${escapeHtml(c.last_error)}</div>`
+      : "";
+    output.innerHTML = `
+      <div class="action-form">
+        <label>Status</label>
+        <span class="mono">${runningBadge}</span>
+        <label>Collections</label>
+        <span class="mono">${c.collections}</span>
+        <label>Instances collected</label>
+        <span class="mono">${c.instances_collected}</span>
+        <label>Interval (s)</label>
+        <span class="mono">${c.interval_seconds}</span>
+        <label>Max instances</label>
+        <span class="mono">${c.max_instances}</span>
+        <label>Namespace</label>
+        <span class="mono">${escapeHtml(c.namespace)}</span>
+        ${errorHtml}
+      </div>
+    `;
+  } catch (error) {
+    output.innerHTML = `<div class="error-band">${escapeHtml(error.code || "Error")}: ${escapeHtml(error.message)}</div>`;
+  }
+}
+
 /* =============================================================
    CONNECTION / HEALTH
    ============================================================= */
@@ -1109,7 +1150,18 @@ function serviceControls(key, data) {
       )}
       ${data.instances.length
         ? `<section class="panel"><div class="panel-heading"><h3>Instance Actions</h3><span class="panel-meta">Connect · Start · Stop · Reboot · Terminate (session-owned only)</span></div><div class="action-list">${instanceRows}</div></section>`
-        : ""}`;
+        : ""}
+      ${panel("EC2 Metrics Collector", "Collect container-level metrics (CPU, memory, network, disk) from running Floci EC2 instances and publish them to CloudWatch Metrics under namespace LocalCloud/EC2 with an InstanceId dimension. These are host/container measurements, not native AWS EC2 metrics. Requires host Docker access (docker stats).",
+        '<div class="action-form">' +
+        '<label>Interval (s)<select name="interval_seconds"><option value="10">10</option><option value="30">30</option><option value="60" selected>60</option><option value="120">120</option><option value="300">300</option></select></label>' +
+        '<label>Max instances<select name="max_instances"><option value="1">1</option><option value="5">5</option><option value="10" selected>10</option><option value="20">20</option></select></label>' +
+        '<button class="primary-button" type="submit" data-action="ec2-metrics-start">Start collector</button>' +
+        '<button class="secondary-button" type="submit" data-action="ec2-metrics-stop">Stop collector</button>' +
+        '<span class="form-note" style="grid-column: 1 / -1;">Collector status and last error are shown below. Without Docker access the collector runs but reports that \'docker stats\' is unavailable.</span>' +
+        '</div>' +
+        '<div id="ec2-metrics-status" class="cw-monitoring"></div>'
+      )}
+    `;
   }
 
   if (key === "lambda") {
@@ -1238,6 +1290,9 @@ function renderService(key, response) {
       const sel = document.getElementById("cw-instance-select");
       if (sel) sel.innerHTML = `<option value="">Instance list unavailable</option>`;
     });
+  }
+  if (key === "ec2") {
+    fetchEc2MetricsStatus();
   }
 }
 
@@ -1592,6 +1647,21 @@ async function handleFormSubmit(event) {
       if (metricGraphState && metricGraphState.instanceId === instanceId && metricGraphState.metricName === metricName) {
         await fetchMetricStatistics(metricGraphState);
       }
+      if (submitBtn && !wasDisabled) submitBtn.disabled = false;
+      return;
+    } else if (action === "ec2-metrics-start") {
+      const interval = form.elements.interval_seconds ? Number(form.elements.interval_seconds.value) : 60;
+      const maxInstances = form.elements.max_instances ? Number(form.elements.max_instances.value) : 10;
+      result = await postJson("/api/services/ec2/metrics/collector/start", {
+        interval_seconds: interval,
+        max_instances: maxInstances,
+      });
+      await fetchEc2MetricsStatus();
+      if (submitBtn && !wasDisabled) submitBtn.disabled = false;
+      return;
+    } else if (action === "ec2-metrics-stop") {
+      result = await postJson("/api/services/ec2/metrics/collector/stop");
+      await fetchEc2MetricsStatus();
       if (submitBtn && !wasDisabled) submitBtn.disabled = false;
       return;
     } else if (action === "run-instances") {
