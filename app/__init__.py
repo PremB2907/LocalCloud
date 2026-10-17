@@ -1,11 +1,44 @@
 from flask import Flask
+import os
 
 from app.clients import ClientProvider
 from app.config import AppConfig
 from app.routes import console
 
 
+def _load_dotenv(path=".env"):
+    """Load ``KEY=VALUE`` lines from ``.env`` into ``os.environ`` without
+    overwriting variables already present in the environment.
+
+    A small, dependency-free subset of the dotenv format: blank lines and
+    comments are skipped, an optional ``export `` prefix is stripped, and
+    optional surrounding single or double quotes are removed. Values are
+    never printed, logged, or committed; ``.env`` itself is gitignored.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            lines = handle.readlines()
+    except OSError:
+        return
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):]
+        if "=" not in line:
+            continue
+        name, value = line.split("=", 1)
+        name = name.strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        if name and name not in os.environ:
+            os.environ[name] = value
+
+
 def create_app(test_config=None):
+    _load_dotenv()
     config = AppConfig.from_env()
     overrides = test_config or {}
     config_values = {

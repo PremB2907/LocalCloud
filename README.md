@@ -65,12 +65,14 @@ Install the pinned Python dependencies into the existing environment:
 Start the dashboard from the workspace root:
 
 ```bash
-FLOCI_ENDPOINT_URL=http://127.0.0.1:4566 \
-AWS_REGION=us-east-1 \
-AWS_ACCESS_KEY_ID=test \
-AWS_SECRET_ACCESS_KEY=test \
 .venv/bin/python run.py
 ```
+
+The entry point loads `KEY=VALUE` lines from the workspace `.env` file
+(if present) without overwriting variables already in the environment, so
+SMTP credentials and Floci settings configured in `.env` are picked up
+automatically through `AppConfig.from_env`. Values stay out of source
+control: `.env` is gitignored and never read by the frontend.
 
 Open `http://127.0.0.1:5000`. The Flask process is bound to `127.0.0.1`; it is not published to the LAN. Stop the dashboard with Ctrl+C. If Floci is unavailable, the page remains available and marks the connection disconnected.
 
