@@ -3,6 +3,7 @@ import os
 import subprocess
 import time
 import uuid
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit
 
 import boto3
@@ -440,6 +441,84 @@ def test_cloudwatch_dashboard_reads_real_log_events_and_cleans_temporary_group(a
             assert deleted.status_code == 200, deleted.json
             remaining = logs.describe_log_groups(logGroupNamePrefix=group, limit=50).get("logGroups", [])
             assert all(item.get("logGroupName") != group for item in remaining)
+
+
+def test_cloudwatch_ec2_instance_monitoring(app):
+    """Publish real EC2 metric datapoints via PutMetricData and read them back
+    through GetMetricStatistics and ListMetrics."""
+    client = app.test_client()
+    ec2 = _client(app, "ec2")
+    instance_ids = []
+    try:
+        launched = client.post("/api/services/ec2/instances", json={
+            "image_id": "ami-ubuntu2204",
+            "instance_type": "t2.micro",
+            "name": f"lc-console-it-cw-{_suffix()}",
+            "count": 1,
+        })
+        assert launched.status_code == 201, launched.json
+        instance_ids = launched.json["resource"]["instance_ids"]
+        assert len(instance_ids) == 1
+        ec2.get_waiter("instance_running").wait(
+            InstanceIds=instance_ids,
+            WaiterConfig={"Delay": 1, "MaxAttempts": 20},
+        )
+
+        now = datetime.now(timezone.utc)
+        published = client.post("/api/services/cloudwatch/metric-data", json={
+            "namespace": "AWS/EC2",
+            "metric_name": "CPUUtilization",
+            "value": 50.0,
+            "unit": "Percent",
+            "dimensions": [{"name": "InstanceId", "value": instance_ids[0]}],
+            "timestamp": now.isoformat(),
+        })
+        assert published.status_code == 201, published.json
+
+        # ListMetrics must now expose the published metric with its dimension.
+        listed = client.get("/api/services/cloudwatch")
+        assert listed.status_code == 200
+        metrics = listed.json["data"]["metrics"]["metrics"]
+        assert any(
+            m.get("namespace") == "AWS/EC2"
+            and m.get("name") == "CPUUtilization"
+            and any(d.get("Name") == "InstanceId" and d.get("Value") == instance_ids[0]
+                    for d in m.get("dimensions", []))
+            for m in metrics
+        ), metrics
+
+        # Read the datapoints back through GetMetricStatistics.
+        start = (now - timedelta(minutes=5)).isoformat()
+        end = (now + timedelta(minutes=5)).isoformat()
+        stats = client.get("/api/services/cloudwatch/metric-statistics", query_string={
+            "namespace": "AWS/EC2",
+            "metric_name": "CPUUtilization",
+            "dimensions": '[{"name": "InstanceId", "value": "' + instance_ids[0] + '"}]',
+            "start_time": start,
+            "end_time": end,
+            "period": "60",
+            "statistic": "Average",
+        })
+        assert stats.status_code == 200, stats.json
+        assert stats.json["ok"] is True
+        datapoints = stats.json["datapoints"]
+        assert len(datapoints) >= 1, datapoints
+        assert datapoints[0]["average"] == 50.0
+        assert datapoints[0]["unit"] == "Percent"
+    finally:
+        if instance_ids:
+            ec2.terminate_instances(InstanceIds=instance_ids)
+            ec2.get_waiter("instance_terminated").wait(
+                InstanceIds=instance_ids,
+                WaiterConfig={"Delay": 1, "MaxAttempts": 20},
+            )
+            remaining = {
+                inst["InstanceId"]: inst["State"]["Name"]
+                for page in ec2.get_paginator("describe_instances").paginate()
+                for reservation in page.get("Reservations", [])
+                for inst in reservation.get("Instances", [])
+            }
+            assert all(remaining.get(iid) == "terminated" for iid in instance_ids)
 
 
 def test_ec2_dashboard_launch_stop_start_and_terminate(app):

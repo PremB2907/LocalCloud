@@ -1604,6 +1604,30 @@ tbody tr[hidden] {
   margin: var(--s4) 0;
 }
 
+/* CLOUDWATCH EC2 INSTANCE MONITORING */
+.cw-graph-output { margin: var(--s4) 0 var(--s6); }
+.cw-graph-wrap {
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--bg-surface);
+  padding: var(--s4);
+}
+canvas.cw-graph {
+  display: block;
+  width: 100%;
+  max-width: 760px;
+  height: 300px;
+  background: var(--bg-input);
+  border: 1px solid var(--border-input);
+  border-radius: var(--r-md);
+  margin: 0 auto;
+}
+.cw-monitoring .form-note {
+  grid-column: 1 / -1;
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+}
+
 /* ============================================================
    REDUCED MOTION
    ============================================================ */

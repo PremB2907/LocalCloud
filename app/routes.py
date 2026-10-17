@@ -443,6 +443,84 @@ def post_cloudwatch_delete_log_group():
         return _operation_error(error)
 
 
+@console.post("/api/services/cloudwatch/metric-data")
+def post_cloudwatch_metric_data():
+    """Publish one CloudWatch metric datum (e.g. per-EC2-instance samples).
+
+    Floci does not auto-emit EC2 metrics, so datapoints only appear once they
+    are published here through the real PutMetricData API.
+    """
+    payload = _body()
+    namespace = payload.get("namespace", "")
+    metric_name = payload.get("metric_name", "")
+    value = payload.get("value")
+    unit = payload.get("unit") or None
+    dimensions = payload.get("dimensions") or []
+    timestamp = payload.get("timestamp") or None
+    if not isinstance(namespace, str) or not namespace:
+        return jsonify({"ok": False, "error": {"code": "ValidationError", "message": "A metric namespace is required."}}), 400
+    if not isinstance(metric_name, str) or not metric_name:
+        return jsonify({"ok": False, "error": {"code": "ValidationError", "message": "A metric name is required."}}), 400
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return jsonify({"ok": False, "error": {"code": "ValidationError", "message": "A numeric metric value is required."}}), 400
+    if not isinstance(dimensions, list):
+        return jsonify({"ok": False, "error": {"code": "ValidationError", "message": "Dimensions must be a list of {name, value} objects."}}), 400
+    try:
+        response = cloudwatch.put_metric_data(
+            _client("cloudwatch"), namespace, metric_name, value, unit,
+            dimensions, timestamp,
+        )
+        _record_operation("PutMetricData", f"{namespace}/{metric_name}", "Succeeded")
+        return jsonify({"ok": True, "http_status": response["ResponseMetadata"]["HTTPStatusCode"]}), 201
+    except (ClientError, BotoCoreError, ValueError) as error:
+        _record_operation("PutMetricData", f"{namespace}/{metric_name}", "Failed")
+        return _operation_error(error)
+
+
+@console.get("/api/services/cloudwatch/metric-statistics")
+def get_cloudwatch_metric_statistics():
+    """Return aggregated datapoints for one metric over a time range."""
+    args = request.args
+    namespace = args.get("namespace", "")
+    metric_name = args.get("metric_name", "")
+    dimensions_raw = args.get("dimensions", "[]")
+    start_time = args.get("start_time", "")
+    end_time = args.get("end_time", "")
+    period = args.get("period", "300")
+    statistic = args.get("statistic", "Average")
+    unit = args.get("unit") or None
+    if not isinstance(namespace, str) or not namespace:
+        return jsonify({"ok": False, "error": {"code": "ValidationError", "message": "A metric namespace is required."}}), 400
+    if not isinstance(metric_name, str) or not metric_name:
+        return jsonify({"ok": False, "error": {"code": "ValidationError", "message": "A metric name is required."}}), 400
+    try:
+        dimensions = json.loads(dimensions_raw)
+    except (ValueError, TypeError):
+        return jsonify({"ok": False, "error": {"code": "ValidationError", "message": "Dimensions must be valid JSON."}}), 400
+    if not isinstance(dimensions, list):
+        return jsonify({"ok": False, "error": {"code": "ValidationError", "message": "Dimensions must be a list of {name, value} objects."}}), 400
+    try:
+        start = datetime.fromisoformat(start_time) if start_time else None
+        end = datetime.fromisoformat(end_time) if end_time else None
+    except ValueError:
+        return jsonify({"ok": False, "error": {"code": "ValidationError", "message": "start_time and end_time must be ISO 8601 timestamps."}}), 400
+    try:
+        period = int(period)
+    except ValueError:
+        return jsonify({"ok": False, "error": {"code": "ValidationError", "message": "Period must be an integer (seconds)."}}), 400
+    valid_statistics = {"Average", "Sum", "Minimum", "Maximum", "SampleCount"}
+    if statistic not in valid_statistics:
+        return jsonify({"ok": False, "error": {"code": "ValidationError", "message": f"Statistic must be one of: {', '.join(sorted(valid_statistics))}."}}), 400
+    try:
+        result = cloudwatch.get_metric_statistics(
+            _client("cloudwatch"), namespace, metric_name, dimensions,
+            start, end, period, statistic, unit,
+        )
+        return jsonify({"ok": True, **result})
+    except (ClientError, BotoCoreError, ValueError) as error:
+        return _operation_error(error)
+
+
 @console.get("/api/services/s3/buckets/<bucket_name>/objects/<path:key>/download")
 def download_s3_object(bucket_name, key):
     try:

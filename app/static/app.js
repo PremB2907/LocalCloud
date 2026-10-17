@@ -45,6 +45,7 @@ const serviceIcons = {
 let currentView = "overview";
 let catalog = {};
 const receiptHandles = new Map();
+let metricGraphState = null;
 
 /* ---- DOM refs ---- */
 const pageContent   = document.getElementById("page-content");
@@ -359,6 +360,189 @@ function renderListingFilter() {
   filterInput = input;
   input.addEventListener("input", applyListingFilter);
   applyListingFilter();
+}
+
+/* =============================================================
+   CLOUDWATCH EC2 MONITORING GRAPH
+   ============================================================= */
+
+const STAT_KEY = {
+  Average:    "average",
+  Sum:        "sum",
+  Minimum:    "minimum",
+  Maximum:    "maximum",
+  SampleCount:"sample_count",
+};
+
+function presetTimeRange(range) {
+  const end = new Date();
+  const start = new Date();
+  const minutes = {"5m": 5, "15m": 15, "1h": 60, "3h": 180, "6h": 360, "12h": 720, "24h": 1440}[range] || 60;
+  start.setMinutes(start.getMinutes() - minutes);
+  const iso = (d) => d.toISOString().replace(/\.\d{3}Z$/, "Z");
+  return { start: iso(start), end: iso(end) };
+}
+
+function formatMetricTimestamp(value) {
+  if (!value) return "-";
+  return new Date(value).toLocaleString(undefined, { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+/**
+ * Draw a line graph of one statistic across the datapoints on a canvas.
+ */
+function drawMetricGraph(canvas, datapoints, statistic, unit) {
+  const ctx = canvas.getContext("2d");
+  const dpr = window.devicePixelRatio || 1;
+  const displayWidth = canvas.clientWidth || 700;
+  const displayHeight = canvas.clientHeight || 300;
+  canvas.width = displayWidth * dpr;
+  canvas.height = displayHeight * dpr;
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, displayWidth, displayHeight);
+
+  const statKey = STAT_KEY[statistic] || "average";
+  const points = datapoints.filter((d) => typeof d[statKey] === "number");
+  if (!points.length) {
+    ctx.fillStyle = "#6b7280";
+    ctx.font = "14px var(--font-sans)";
+    ctx.textAlign = "center";
+    ctx.fillText("No datapoints to graph", displayWidth / 2, displayHeight / 2);
+    return;
+  }
+
+  const pad = { left: 56, right: 22, top: 24, bottom: 42 };
+  const plotW = displayWidth - pad.left - pad.right;
+  const plotH = displayHeight - pad.top - pad.bottom;
+  const values = points.map((d) => d[statKey]);
+  const vMin = Math.min(...values);
+  const vMax = Math.max(...values);
+  const vRange = vMax === vMin ? 1 : vMax - vMin;
+  const padV = vRange * 0.1;
+  const scaleV = (v) => pad.top + plotH - ((v - (vMin - padV)) / (vRange + 2 * padV)) * plotH;
+  const scaleX = (i) => pad.left + (i / (points.length - 1 || 1)) * plotW;
+
+  // Axes
+  ctx.strokeStyle = "#9ca3af";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(pad.left, pad.top);
+  ctx.lineTo(pad.left, pad.top + plotH);
+  ctx.lineTo(pad.left + plotW, pad.top + plotH);
+  ctx.stroke();
+
+  // Y ticks
+  const ticks = 5;
+  ctx.fillStyle = "#6b7280";
+  ctx.font = "11px var(--font-sans)";
+  ctx.textAlign = "right";
+  for (let t = 0; t <= ticks; t++) {
+    const v = vMin - padV + (vRange + 2 * padV) * (t / ticks);
+    const y = scaleV(v);
+    ctx.fillText(v.toFixed(2), pad.left - 8, y + 4);
+    ctx.beginPath();
+    ctx.moveTo(pad.left - 4, y);
+    ctx.lineTo(pad.left, y);
+    ctx.stroke();
+  }
+  ctx.fillStyle = "#6b7280";
+  ctx.font = "bold 11px var(--font-sans)";
+  ctx.textAlign = "right";
+  ctx.fillText(unit || "", pad.left - 8, pad.top - 8);
+
+  // X ticks
+  ctx.textAlign = "center";
+  const xTicks = Math.min(points.length, 6);
+  for (let t = 0; t < xTicks; t++) {
+    const i = Math.floor((t / (xTicks - 1 || 1)) * (points.length - 1));
+    const x = scaleX(i);
+    ctx.fillText(formatMetricTimestamp(points[i].timestamp), x, pad.top + plotH + 18);
+    ctx.beginPath();
+    ctx.moveTo(x, pad.top + plotH);
+    ctx.lineTo(x, pad.top + plotH + 4);
+    ctx.stroke();
+  }
+
+  // Line + points
+  ctx.strokeStyle = "#2563eb";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  points.forEach((d, i) => {
+    const x = scaleX(i);
+    const y = scaleV(d[statKey]);
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+  ctx.fillStyle = "#2563eb";
+  points.forEach((d, i) => {
+    ctx.beginPath();
+    ctx.arc(scaleX(i), scaleV(d[statKey]), 3, 0, 2 * Math.PI);
+    ctx.fill();
+  });
+
+  // Latest value annotation
+  const last = points[points.length - 1];
+  ctx.fillStyle = "#2563eb";
+  ctx.font = "bold 13px var(--font-sans)";
+  const label = `${last[statKey].toFixed(2)}${unit ? " " + unit : ""}`;
+  ctx.fillText(label, scaleX(points.length - 1) + 8, scaleV(last[statKey]));
+}
+
+/**
+ * Render the metric graph output (canvas + datapoint table) into a container.
+ */
+function renderMetricGraphOutput(container, datapoints, statistic, unit) {
+  container.innerHTML = "";
+  const head = el("div", { class: "section-heading" },
+    el("h2", {}, "Metric graph"),
+    el("span", { class: "section-meta" },
+      `${escapeHtml(statistic)} ${escapeHtml(unit || "–")} · ${datapoints.length} datapoint${datapoints.length !== 1 ? "s" : ""}`
+    )
+  );
+  container.appendChild(head);
+  const wrap = el("div", { class: "cw-graph-wrap" },
+    el("canvas", { class: "cw-graph", width: "700", height: "300", role: "img",
+      "aria-label": `${escapeHtml(statistic)} metric graph, ${datapoints.length} datapoints` })
+  );
+  container.appendChild(wrap);
+  drawMetricGraph(wrap.querySelector("canvas"), datapoints, statistic, unit);
+  if (datapoints.length) {
+    const rows = datapoints.map((d) =>
+      el("tr", {},
+        el("td", { class: "mono" }, d.timestamp),
+        el("td", { class: "mono" }, (d[STAT_KEY[statistic] || "average"] ?? "-").toString()),
+        el("td", {}, d.unit || "-")
+      )
+    );
+    container.appendChild(buildTablePanel("Datapoints", rows,
+      [["timestamp", "Timestamp"], ["value", "Value"], ["unit", "Unit"]]));
+  }
+}
+
+/**
+ * Fetch metric statistics for a stored query state and render the graph.
+ */
+async function fetchMetricStatistics(state) {
+  const dimensions = JSON.stringify([{ name: "InstanceId", value: state.instanceId }]);
+  const query = new URLSearchParams({
+    namespace: state.namespace || "AWS/EC2",
+    metric_name: state.metricName,
+    dimensions,
+    start_time: state.start,
+    end_time: state.end,
+    period: state.period || "300",
+    statistic: state.statistic || "Average",
+  });
+  if (state.unit) query.set("unit", state.unit);
+  const output = document.getElementById("cw-graph-output");
+  output.innerHTML = `<div class="initial-state"><span>Loading metric data…</span></div>`;
+  const result = await requestJson(`/api/services/cloudwatch/metric-statistics?${query}`).catch((error) => {
+    output.innerHTML = `<div class="error-band">${escapeHtml(error.code || "Error")}: ${escapeHtml(error.message)}</div>`;
+    return null;
+  });
+  if (!result) return;
+  renderMetricGraphOutput(output, result.datapoints || [], state.statistic || "Average", state.unit || "");
 }
 
 /* =============================================================
@@ -837,6 +1021,34 @@ function serviceControls(key, data) {
           <button class="primary-button" type="submit" ${ownedGroups.length ? "" : "disabled"}>Put log event</button>
         </form>`
       )}
+      ${panel("EC2 Instance Monitoring", "Publish and view real CloudWatch metrics for a running instance. Floci does not auto-emit EC2 metrics, so datapoints appear only after they are published through the PutMetricData form below.",
+        `<div class="cw-monitoring">
+          <div class="action-form">
+            <label>Instance<select id="cw-instance-select" name="instance_id" required><option value="">Loading instances…</option></select></label>
+            <label>Metric name<input name="metric_name" list="ec2-metric-names" value="CPUUtilization" autocomplete="off"></label>
+            <datalist id="ec2-metric-names"><option value="CPUUtilization"><option value="NetworkIn"><option value="NetworkOut"><option value="DiskReadOps"><option value="DiskWriteOps"><option value="DiskReadBytes"><option value="DiskWriteBytes"><option value="CPUCreditUsage"><option value="CPUCreditBalance"></datalist>
+            <label>Statistic<select name="statistic"><option value="Average">Average</option><option value="Sum">Sum</option><option value="Minimum">Minimum</option><option value="Maximum">Maximum</option><option value="SampleCount">Sample count</option></select></label>
+            <label>Period (s)<select name="period"><option value="60">60</option><option value="300" selected>300</option><option value="900">900</option><option value="3600">3600</option></select></label>
+            <label>Time range<select name="time_range"><option value="5m">Last 5 minutes</option><option value="15m">Last 15 minutes</option><option value="1h" selected>Last hour</option><option value="3h">Last 3 hours</option><option value="6h">Last 6 hours</option><option value="12h">Last 12 hours</option><option value="24h">Last 24 hours</option><option value="custom">Custom</option></select></label>
+            <label>Start (ISO)<input name="start_time" class="cw-iso-input" autocomplete="off"></label>
+            <label>End (ISO)<input name="end_time" class="cw-iso-input" autocomplete="off"></label>
+            <button class="primary-button" type="submit" data-action="fetch-metric-statistics">Fetch metric data</button>
+            <button class="secondary-button" type="button" data-action="refresh-metric-graph">Refresh</button>
+            <span class="form-note" style="grid-column: 1 / -1;">Presets override Start/End. Choose Custom to set them manually. Times are UTC.</span>
+          </div>
+          <div id="cw-graph-output" class="cw-graph-output"></div>
+        </div>`
+      )}
+      ${panel("Publish metric datum", "Publish a real datapoint to CloudWatch Metrics for the selected instance (PutMetricData). This is how data appears in the graph above; Floci does not auto-emit EC2 metrics.",
+        `<form class="action-form" data-action="publish-metric-datum">
+          <label>Namespace<input name="namespace" value="AWS/EC2" autocomplete="off"></label>
+          <label>Metric name<input name="metric_name" value="CPUUtilization" autocomplete="off"></label>
+          <label>Value<input name="value" type="number" step="any" placeholder="e.g. 42.5" autocomplete="off"></label>
+          <label>Unit<select name="unit"><option value="">None</option><option value="Percent">Percent</option><option value="Count">Count</option><option value="Bytes">Bytes</option><option value="Bytes/Second">Bytes/Second</option></select></label>
+          <button class="primary-button" type="submit">Publish datapoint</button>
+          <span class="form-note" style="grid-column: 1 / -1;">The InstanceId dimension is taken from the instance selector above. The datapoint is timestamped now.</span>
+        </form>`
+      )}
       ${groups.length
         ? `<section class="panel"><div class="panel-heading"><h3>Log Group Explorer</h3><span class="panel-meta">List streams and inspect events</span></div><div class="action-list">${logRows}</div></section>`
         : ""}`;
@@ -1008,6 +1220,25 @@ function renderService(key, response) {
   pageContent.appendChild(detailPane);
 
   renderListingFilter();
+
+  if (key === "cloudwatch") {
+    requestJson("/api/services/ec2").then((resp) => {
+      const instances = (resp.data && resp.data.instances) || [];
+      const sel = document.getElementById("cw-instance-select");
+      if (!sel) return;
+      if (!instances.length) {
+        sel.innerHTML = `<option value="">No instances found</option>`;
+        return;
+      }
+      sel.innerHTML = `<option value="">Choose an instance</option>` +
+        instances.map((inst) =>
+          `<option value="${escapeHtml(inst.id)}">${escapeHtml(inst.id)}</option>`
+        ).join("");
+    }).catch(() => {
+      const sel = document.getElementById("cw-instance-select");
+      if (sel) sel.innerHTML = `<option value="">Instance list unavailable</option>`;
+    });
+  }
 }
 
 async function renderServicePage(key) {
@@ -1309,6 +1540,60 @@ async function handleFormSubmit(event) {
       toast(`HTTP API returned ${result.status_code}.`);
       if (submitBtn && !wasDisabled) submitBtn.disabled = false;
       return;
+    } else if (action === "fetch-metric-statistics") {
+      const instanceId = form.elements.instance_id ? form.elements.instance_id.value : "";
+      const metricName = form.elements.metric_name ? form.elements.metric_name.value : "";
+      if (!instanceId) throw new Error("Choose an EC2 instance first.");
+      if (!metricName) throw new Error("Enter a metric name.");
+      const timeRange = form.elements.time_range ? form.elements.time_range.value : "1h";
+      let start = form.elements.start_time ? form.elements.start_time.value : "";
+      let end = form.elements.end_time ? form.elements.end_time.value : "";
+      if (timeRange !== "custom") {
+        const range = presetTimeRange(timeRange);
+        start = range.start;
+        end = range.end;
+      }
+      const statistic = form.elements.statistic ? form.elements.statistic.value : "Average";
+      const period = form.elements.period ? form.elements.period.value : "300";
+      const unit = form.elements.unit ? form.elements.unit.value : "";
+      metricGraphState = {
+        instanceId,
+        metricName,
+        namespace: "AWS/EC2",
+        statistic,
+        period,
+        start,
+        end,
+        unit,
+      };
+      try {
+        await fetchMetricStatistics(metricGraphState);
+      } catch (error) {
+        // error already rendered by fetchMetricStatistics
+      }
+      if (submitBtn && !wasDisabled) submitBtn.disabled = false;
+      return;
+    } else if (action === "publish-metric-datum") {
+      const instanceId = document.getElementById("cw-instance-select") ? document.getElementById("cw-instance-select").value : "";
+      if (!instanceId) throw new Error("Choose an EC2 instance first.");
+      const metricName = values.metric_name;
+      const value = Number(values.value);
+      if (!metricName || typeof metricName !== "string" || !metricName) throw new Error("Enter a metric name.");
+      if (!Number.isFinite(value)) throw new Error("Enter a numeric value.");
+      const dimensions = [{ name: "InstanceId", value: instanceId }];
+      const result = await postJson("/api/services/cloudwatch/metric-data", {
+        namespace: values.namespace || "AWS/EC2",
+        metric_name: metricName,
+        value,
+        unit: values.unit || undefined,
+        dimensions,
+      });
+      toast("Metric datapoint published.");
+      if (metricGraphState && metricGraphState.instanceId === instanceId && metricGraphState.metricName === metricName) {
+        await fetchMetricStatistics(metricGraphState);
+      }
+      if (submitBtn && !wasDisabled) submitBtn.disabled = false;
+      return;
     } else if (action === "run-instances") {
       result = await postJson("/api/services/ec2/instances", {
         ...values,
@@ -1586,6 +1871,16 @@ async function handleActionClick(event) {
       await postJson("/api/services/lambda/functions/delete", { name, confirmed: true, confirm_value: name });
       toast("DeleteFunction succeeded.");
       await navigate("lambda");
+    } else if (action === "refresh-metric-graph") {
+      if (!metricGraphState) return;
+      const output = document.getElementById("cw-graph-output");
+      if (output) output.innerHTML = `<div class="initial-state"><span>Refreshing metric data…</span></div>`;
+      try {
+        await fetchMetricStatistics(metricGraphState);
+      } catch {
+        // fetchMetricStatistics renders its own error band
+      }
+      return;
     }
 
   } catch (error) {
@@ -1942,6 +2237,19 @@ pageContent.addEventListener("click", handleActionClick);
 document.getElementById("refresh-button").addEventListener("click", () => {
   refreshHealth();
   navigate(currentView);
+});
+
+// CloudWatch time-range presets fill the ISO inputs
+pageContent.addEventListener("change", (e) => {
+  const select = e.target.closest("select[name='time_range']");
+  if (!select) return;
+  const form = select.closest(".action-form");
+  if (!form || select.value === "custom") return;
+  const range = presetTimeRange(select.value);
+  const startInput = form.elements.start_time;
+  const endInput = form.elements.end_time;
+  if (startInput) startInput.value = range.start;
+  if (endInput) endInput.value = range.end;
 });
 
 // Hash navigation
