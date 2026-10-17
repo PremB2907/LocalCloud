@@ -544,7 +544,7 @@ def test_cloudwatch_ec2_metrics_collector(app):
 
         # Start the collector with a short interval for fast testing.
         started = client.post("/api/services/ec2/metrics/collector/start", json={
-            "interval_seconds": 5,
+            "interval_seconds": 10,
             "max_instances": 10,
         })
         assert started.status_code == 200, started.json
